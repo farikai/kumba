@@ -1,8 +1,12 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation, useAction } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { ArrowLeft, Phone, Calendar, Repeat } from "lucide-react"
 import PinConfirmationModal from "../shared/pin-confirmation-modal"
+import { useSession } from "@/components/session-provider"
 
 interface AirtimePurchaseScreenProps {
   onBack: () => void
@@ -18,6 +22,13 @@ export default function AirtimePurchaseScreen({ onBack, onComplete }: AirtimePur
   const [scheduleDate, setScheduleDate] = useState("")
   const [frequency, setFrequency] = useState<"once" | "daily" | "weekly" | "monthly">("once")
 
+  const { session } = useSession()
+  const createScheduled = useMutation(api.scheduled.create)
+  const apiAny = api as any
+  // Single money path: provider leg + wallet debit happen together inside
+  // the action, so users never pay for airtime that was never delivered.
+  const buyAirtime = useAction(apiAny.actions["9psb"].buyAirtime)
+
   const networks = [
     { id: "mtn", name: "MTN", logo: "📱", color: "#FFCB05" },
     { id: "airtel", name: "Airtel", logo: "📶", color: "#FF0000" },
@@ -30,6 +41,46 @@ export default function AirtimePurchaseScreen({ onBack, onComplete }: AirtimePur
   const handleProceed = () => {
     if (!selectedNetwork || !phoneNumber || !amount) return
     setShowPinModal(true)
+  }
+
+  /**
+   * Runs AFTER the modal verifies the PIN server-side. Performs the real
+   * money movement (or persists a real scheduled payment) — failures throw
+   * and are shown in the modal instead of faking success.
+   */
+  const handleVerified = async (autoPay: boolean) => {
+    if (!session) throw new Error("You are not logged in.")
+    const userId = session.userId as Id<"users">
+    const value = Number(amount)
+    if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid amount")
+    const idempotencyKey = `BILL-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    if (isScheduled && autoPay) {
+      const start = scheduleDate ? new Date(scheduleDate).getTime() : Date.now()
+      if (!Number.isFinite(start) || start <= 0) throw new Error("Invalid schedule date")
+      const networkName = networks.find((n) => n.id === selectedNetwork)?.name ?? selectedNetwork
+      await createScheduled({
+        userId,
+        sessionToken: session.sessionToken,
+        recipientName: `${networkName} Airtime - ${phoneNumber}`,
+        amount: value,
+        frequency,
+        nextPaymentDate: start,
+        description: `Airtime purchase - ${phoneNumber}`,
+        idempotencyKey,
+      })
+      return
+    }
+    const result = await buyAirtime({
+      userId,
+      sessionToken: session.sessionToken,
+      network: selectedNetwork as "mtn" | "airtel" | "glo" | "9mobile",
+      phoneNumber,
+      amount: value,
+      idempotencyKey,
+    })
+    if (!result.success) {
+      throw new Error(result.error?.message ?? "Airtime purchase failed")
+    }
   }
 
   const handleSuccess = () => {
@@ -236,6 +287,7 @@ export default function AirtimePurchaseScreen({ onBack, onComplete }: AirtimePur
       <PinConfirmationModal
         isOpen={showPinModal}
         onClose={() => setShowPinModal(false)}
+        onVerified={handleVerified}
         onSuccess={handleSuccess}
         amount={Number(amount)}
         recipient={`${networks.find((n) => n.id === selectedNetwork)?.name} - ${phoneNumber}`}

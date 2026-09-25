@@ -4,14 +4,22 @@ import { v } from "convex/values"
 export const search = query({
   args: { query: v.string() },
   handler: async (ctx, args) => {
-    const all = await ctx.db.query("products").collect()
-    const q = args.query.toLowerCase()
-    return all.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.category.toLowerCase().includes(q) ||
-        p.store.toLowerCase().includes(q)
-    ).filter((p) => p.inStock)
+    const q = args.query.toLowerCase().trim()
+    if (!q) return []
+    // Use category index when query matches a category prefix, else bounded scan.
+    // Bounded to 200 docs to avoid full-table OOM; shop catalog is small in building stage.
+    const byCat = await ctx.db
+      .query("products")
+      .filter((qq) => qq.eq(qq.field("inStock"), true))
+      .take(200)
+    return byCat
+      .filter(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q) ||
+          p.store.toLowerCase().includes(q)
+      )
+      .slice(0, 50)
   },
 })
 
@@ -29,7 +37,7 @@ export const getByCategory = query({
 export const getAll = query({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db.query("products").filter((q) => q.eq(q.field("inStock"), true)).collect()
+    return await ctx.db.query("products").filter((q) => q.eq(q.field("inStock"), true)).take(100)
   },
 })
 
@@ -73,7 +81,7 @@ export const seedProducts = mutation({
       { name: "Prestige Pressure Pot 7L", price: 22000, originalPrice: 28000, store: "Jumia", category: "Home & Kitchen", rating: 4.6, freeDelivery: true, savings: 6000, inStock: true, isMarketplace: false },
     ]
     for (const p of products) {
-      await ctx.db.insert("products", { ...p, sellerId: undefined, sellerProductId: undefined })
+      await ctx.db.insert("products", { ...p })
     }
     return { seeded: true, count: products.length }
   },

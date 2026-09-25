@@ -1,8 +1,12 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation, useAction } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { ArrowLeft, Tv, Calendar, Repeat } from "lucide-react"
 import PinConfirmationModal from "../shared/pin-confirmation-modal"
+import { useSession } from "@/components/session-provider"
 
 interface TvSubscriptionScreenProps {
   onBack: () => void
@@ -18,6 +22,13 @@ export default function TvSubscriptionScreen({ onBack, onComplete }: TvSubscript
   const [isScheduled, setIsScheduled] = useState(false)
   const [scheduleDate, setScheduleDate] = useState("")
   const [frequency, setFrequency] = useState<"once" | "daily" | "weekly" | "monthly">("monthly")
+
+  const { session } = useSession()
+  const createScheduled = useMutation(api.scheduled.create)
+  const apiAny = api as any
+  // Single money path: provider leg + wallet debit happen together inside
+  // the action, so users never pay for a subscription never activated.
+  const payTv = useAction(apiAny.actions["9psb"].payTv)
 
   const providers = [
     { id: "dstv", name: "DSTV", logo: "📺", color: "#0033A0" },
@@ -51,14 +62,53 @@ export default function TvSubscriptionScreen({ onBack, onComplete }: TvSubscript
   const handleVerifyCard = async () => {
     if (!selectedProvider || !smartCardNumber || smartCardNumber.length < 10) return
 
-    // Simulate card verification
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-    setVerifiedName("John Doe - Apartment 5B")
+    // DEMO ONLY: no smart-card validation provider is wired. Label honestly.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    setVerifiedName(`Unverified card ••${smartCardNumber.slice(-4)} (demo — not validated)`)
   }
 
   const handleProceed = () => {
     if (!selectedProvider || !smartCardNumber || !selectedPackage || !verifiedName) return
     setShowPinModal(true)
+  }
+
+  /** Real debit (or real scheduled payment) after server-side PIN check. */
+  const handleVerified = async (autoPay: boolean) => {
+    if (!session) throw new Error("You are not logged in.")
+    if (!selectedPackage) throw new Error("Select a package")
+    const userId = session.userId as Id<"users">
+    const providerName = providers.find((p) => p.id === selectedProvider)?.name ?? selectedProvider
+    const value = Number(selectedPackage.price)
+    if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid package price")
+    const idempotencyKey = `BILL-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    if (isScheduled && autoPay) {
+      const start = scheduleDate ? new Date(scheduleDate).getTime() : Date.now()
+      if (!Number.isFinite(start) || start <= 0) throw new Error("Invalid schedule date")
+      await createScheduled({
+        userId,
+        sessionToken: session.sessionToken,
+        recipientName: `TV - ${providerName}`,
+        amount: value,
+        frequency,
+        nextPaymentDate: start,
+        description: `TV subscription ${selectedPackage.name} - ${smartCardNumber}`,
+        idempotencyKey,
+      })
+      return
+    }
+    const result = await payTv({
+      userId,
+      sessionToken: session.sessionToken,
+      providerCode: selectedProvider,
+      smartCardNumber,
+      packageId: String(selectedPackage.id),
+      phoneNumber: session.phone,
+      amount: value,
+      idempotencyKey,
+    })
+    if (!result.success) {
+      throw new Error(result.error?.message ?? "TV subscription failed")
+    }
   }
 
   const handleSuccess = () => {
@@ -259,6 +309,7 @@ export default function TvSubscriptionScreen({ onBack, onComplete }: TvSubscript
       <PinConfirmationModal
         isOpen={showPinModal}
         onClose={() => setShowPinModal(false)}
+        onVerified={handleVerified}
         onSuccess={handleSuccess}
         amount={selectedPackage?.price || 0}
         recipient={`${providers.find((p) => p.id === selectedProvider)?.name} - ${selectedPackage?.name}`}

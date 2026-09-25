@@ -1,6 +1,10 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 import { ArrowLeft, Plus, Trash2, DollarSign } from "lucide-react"
 import { Button } from "@/components/ui/button"
 
@@ -26,6 +30,10 @@ export default function ManualBudgetCreatorScreen({ onBack }: ManualBudgetCreato
   ])
   const [newCategory, setNewCategory] = useState("")
   const [newAmount, setNewAmount] = useState("")
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
+  const [saveError, setSaveError] = useState("")
+  const { session } = useSession()
+  const setBudget = useMutation(api.budgets.setBudget)
 
   const addCategory = () => {
     if (newCategory && newAmount) {
@@ -45,6 +53,34 @@ export default function ManualBudgetCreatorScreen({ onBack }: ManualBudgetCreato
   const totalAllocated = categories.reduce((sum, cat) => sum + cat.allocated, 0)
   const income = parseFloat(totalIncome) || 0
   const remaining = income - totalAllocated
+
+  /** The Save button previously did nothing. Now it persists every
+   *  category as a monthly budget row (ownership-checked server-side). */
+  const handleSave = async () => {
+    if (!session) {
+      setSaveError("You are not logged in.")
+      setSaveState("error")
+      return
+    }
+    setSaveState("saving")
+    setSaveError("")
+    try {
+      for (const cat of categories) {
+        if (!cat.name.trim() || !(cat.allocated > 0)) continue
+        await setBudget({
+          userId: session.userId as Id<"users">,
+          sessionToken: session.sessionToken,
+          category: cat.name.trim(),
+          amount: cat.allocated,
+          period: "monthly",
+        })
+      }
+      setSaveState("saved")
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Could not save budget.")
+      setSaveState("error")
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-card to-background text-foreground pb-32">
@@ -161,9 +197,16 @@ export default function ManualBudgetCreatorScreen({ onBack }: ManualBudgetCreato
               </div>
             </div>
 
-            <Button className="w-full h-12 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold rounded-xl">
-              Save Budget
+            <Button
+              onClick={handleSave}
+              disabled={saveState === "saving"}
+              className="w-full h-12 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold rounded-xl disabled:opacity-50"
+            >
+              {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved ✓" : "Save Budget"}
             </Button>
+            {saveState === "error" && (
+              <p className="text-red-400 text-xs text-center">{saveError}</p>
+            )}
           </div>
         )}
       </div>

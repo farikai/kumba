@@ -47,7 +47,7 @@ function chunkSpendingSummary(transactions: any[], balance: number): Chunk[] {
   const totalSpent = debits.reduce((s: number, t: any) => s + t.amount, 0)
   const byCategory: Record<string, number> = {}
   for (const t of debits) {
-    const cat = t.category ?? t.description ?? "Other"
+    const cat = (t as any).category ?? (t as any).description ?? "Other"
     byCategory[cat] = (byCategory[cat] ?? 0) + t.amount
   }
   const topCats = Object.entries(byCategory)
@@ -197,6 +197,7 @@ export function buildRagChunks(
 
 export async function ingestUserData(
   userId: string,
+  sessionToken: string,
   transactions: any[],
   beneficiaries: any[],
   scheduledPayments: any[],
@@ -221,16 +222,16 @@ export async function ingestUserData(
     await fetch(`${convexUrl}/api/mutation/rag:store`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ args: { userId, chunks: payload } }),
+      body: JSON.stringify({ args: { userId, sessionToken, chunks: payload } }),
     })
   }
 }
 
-export async function clearUserRagChunks(userId: string) {
+export async function clearUserRagChunks(userId: string, sessionToken: string) {
   if (!convexUrl) return
   await fetch(`${convexUrl}/api/mutation/rag:clearUserChunks`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ args: { userId } }),
+    body: JSON.stringify({ args: { userId, sessionToken } }),
   })
 }

@@ -47,13 +47,18 @@ ALL APP SCREENS (use navigate_screen to go to any):
 - moreFeatures → All features list
 
 RULES:
-1. When user says "send X to [beneficiary name]", look up the beneficiary in SAVED BENEFICIARIES and auto-fill their bank details.
-2. Always ask for confirmation before executing financial operations (send money, buy airtime, etc.).
+1. When user says "send X to [beneficiary name]", FIRST call find_beneficiary to fuzzy-search their beneficiary list. The tool will return exact+close matches.
+2. If find_beneficiary returns multiple suggestions, present them clearly and ask the user which one they mean. DO NOT guess.
+3. If find_beneficiary returns a "didYouMean" suggestion, ask the user if they meant that person.
+4. Always ask for confirmation before executing financial operations (send money, buy airtime, etc.).
 3. When asked about finances, use tools to get REAL data from the financial context — do not make up numbers.
 4. For analysis (budget, tax, financial health), use the dedicated tools — they analyze real transaction data.
 5. If user wants to explore features, use navigate_screen to open the relevant screen.
 6. Be concise and helpful. Use Nigerian context (₦, local references).
 7. After a successful transaction, offer to share the receipt via WhatsApp.
+8. Money movement, scheduled payments, budgets and beneficiaries are only
+   persisted after the user confirms with their transaction PIN. Never claim
+   something was saved, scheduled, or sent until the execution result says so.
 
 SHOPPING & BUDGET RULES:
 8. When user wants to buy something, FIRST call search_products to find real products and compare prices across stores.
@@ -64,12 +69,17 @@ SHOPPING & BUDGET RULES:
 
 export async function POST(req: Request) {
   try {
-    const { messages, userId } = await req.json()
-    if (!userId) {
-      return new Response(JSON.stringify({ error: "userId required" }), { status: 400 })
+    const { messages, userId, sessionToken } = await req.json()
+    if (!userId || !sessionToken) {
+      return new Response(JSON.stringify({ error: "userId and sessionToken required" }), { status: 401 })
     }
 
-    const financialCtx = await buildFinancialContext(userId)
+    let financialCtx
+    try {
+      financialCtx = await buildFinancialContext(userId, sessionToken)
+    } catch {
+      return new Response(JSON.stringify({ error: "Session invalid. Log in again." }), { status: 401 })
+    }
     const ragContext = formatFinancialContext(financialCtx)
 
     // Lazy-trigger ingestion if no semantic chunks exist yet
@@ -77,7 +87,7 @@ export async function POST(req: Request) {
       fetch(`${process.env.NEXT_PUBLIC_CONVEX_SITE_URL ?? ""}/api/query/rag:count`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ args: { userId } }),
+        body: JSON.stringify({ args: { userId, sessionToken } }),
       })
         .then(async (r) => {
           if (r.ok) {
@@ -86,7 +96,7 @@ export async function POST(req: Request) {
               fetch(`${req.headers.get("origin") ?? "http://localhost:3000"}/api/kumba-ingest`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ userId }),
+                body: JSON.stringify({ userId, sessionToken }),
               }).catch(() => {})
             }
           }
@@ -128,11 +138,14 @@ When the user asks about their finances, use this data. For operations, use the 
 
       const ctx = {
         userId,
+        sessionToken,
+        budgets: financialCtx.budgets,
         fetchUserData: async () => ({
           balance: financialCtx.balance,
           transactions: financialCtx.recentTransactions,
           beneficiaries: financialCtx.beneficiaries,
           scheduledPayments: financialCtx.scheduledPayments,
+          budgets: financialCtx.budgets,
           totalSpentThisMonth: financialCtx.totalSpentThisMonth,
           totalReceivedThisMonth: financialCtx.totalReceivedThisMonth,
           spendingByCategory: financialCtx.spendingByCategory,
@@ -214,8 +227,10 @@ When the user asks about their finances, use this data. For operations, use the 
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : "Unknown error"
     console.error("[Kumba Chat] Error:", msg)
+    // Keep HTTP 200 for existing clients, but flag the failure explicitly
+    // so the UI can distinguish an outage from a real answer.
     return new Response(
-      JSON.stringify({ content: `I'm having trouble connecting right now. (${msg})\nPlease try again or use the menu below.` }),
+      JSON.stringify({ content: `I'm having trouble connecting right now. (${msg})\nPlease try again or use the menu below.`, error: true }),
       { headers: { "Content-Type": "application/json" } },
     )
   }

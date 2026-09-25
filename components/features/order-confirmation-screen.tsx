@@ -1,14 +1,21 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { ArrowLeft, Check, Bot, Package, Truck } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { useSession } from "@/components/session-provider"
 
 interface Product {
   name: string
   price: number
   store: string
   image: string
+  category?: string
+  // Present for marketplace items (mirrored from sellerProducts).
+  sellerProductId?: string
 }
 
 interface OrderConfirmationScreenProps {
@@ -20,6 +27,12 @@ interface OrderConfirmationScreenProps {
 export default function OrderConfirmationScreen({ product, onBack, onComplete }: OrderConfirmationScreenProps) {
   const [step, setStep] = useState<"confirm" | "pin" | "success">("confirm")
   const [pin, setPin] = useState("")
+  const [pinError, setPinError] = useState("")
+  const [isProcessing, setIsProcessing] = useState(false)
+
+  const { session } = useSession()
+  const verifyPinStrict = useMutation(api.users.verifyPinStrict)
+  const placeOrder = useMutation(api.orders.placeOrder)
 
   const deliveryFee = 1200
   const total = product.price + deliveryFee
@@ -28,12 +41,51 @@ export default function OrderConfirmationScreen({ product, onBack, onComplete }:
     if (pin.length < 4) {
       const newPin = pin + digit
       setPin(newPin)
+      setPinError("")
       if (newPin.length === 4) {
-        // Auto-submit when 4 digits entered
-        setTimeout(() => {
-          setStep("success")
-        }, 500)
+        void submitOrder(newPin)
       }
+    }
+  }
+
+  /**
+   * Previously ANY 4 digits showed "Order Placed Successfully" with zero
+   * backend calls. Now the PIN is verified server-side and the order +
+   * wallet debit go through orders:placeOrder (idempotent).
+   */
+  const submitOrder = async (pinValue: string) => {
+    if (isProcessing) return
+    setIsProcessing(true)
+    setPinError("")
+    try {
+      if (!session) throw new Error("You are not logged in. Restart the app and log in again.")
+      await verifyPinStrict({
+        userId: session.userId as Id<"users">,
+        sessionToken: session.sessionToken,
+        pin: pinValue,
+      })
+      // Total charged = item + delivery, so the debited amount always
+      // matches what the confirmation screen displayed. Marketplace items
+      // carry their sellerProductId so the order links, decrements stock,
+      // and accrues the seller payout server-side.
+      await placeOrder({
+        userId: session.userId as Id<"users">,
+        sessionToken: session.sessionToken,
+        productName: product.name,
+        productPrice: total,
+        store: product.store,
+        category: product.category ?? "Shopping",
+        idempotencyKey: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+        ...(product.sellerProductId
+          ? { sellerProductId: product.sellerProductId as Id<"sellerProducts"> }
+          : {}),
+      })
+      setStep("success")
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : "Order failed. Try again.")
+      setPin("")
+    } finally {
+      setIsProcessing(false)
     }
   }
 
@@ -217,6 +269,13 @@ export default function OrderConfirmationScreen({ product, onBack, onComplete }:
         <button className="text-[#00FF41] text-sm font-semibold mb-12 hover:text-[#00FF41]/80 transition-colors">
           Forgot PIN?
         </button>
+
+        {pinError && (
+          <p className="text-red-400 text-sm text-center mb-6 animate-pulse">{pinError}</p>
+        )}
+        {isProcessing && (
+          <p className="text-[#00FF41] text-sm text-center mb-6">Processing your order…</p>
+        )}
 
         {/* Number Pad */}
         <div className="grid grid-cols-3 gap-4 w-full max-w-xs mb-8">

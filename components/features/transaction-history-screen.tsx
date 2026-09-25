@@ -2,89 +2,38 @@
 
 import { useState } from "react"
 import { ArrowLeft, Search, ArrowDownToLine, ArrowUpFromLine, ShoppingBag, Filter } from "lucide-react"
+import { useQuery } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 
 interface TransactionHistoryScreenProps {
   onBack: () => void
+  userId?: Id<"users"> | string | null
 }
 
-export default function TransactionHistoryScreen({ onBack }: TransactionHistoryScreenProps) {
+export default function TransactionHistoryScreen({ onBack, userId }: TransactionHistoryScreenProps) {
   const [filterTab, setFilterTab] = useState<"all" | "sent" | "received">("all")
   const [searchQuery, setSearchQuery] = useState("")
+  const { session } = useSession()
+  const effectiveUserId = (session?.userId ?? userId) as Id<"users"> | undefined
+  const liveTxs = useQuery(
+    api.wallet.getTransactions,
+    effectiveUserId && session?.sessionToken
+      ? { userId: effectiveUserId, sessionToken: session.sessionToken, limit: 50 }
+      : "skip"
+  )
+  const mappedLive = (liveTxs ?? []).map((t: any, i: number) => ({
+    id: t._id ?? i,
+    type: t.type === "credit" ? "received" : "sent",
+    title: t.recipientName ?? t.description,
+    description: `${t.description} • ${t.status}`,
+    amount: t.type === "credit" ? t.amount : -t.amount,
+    date: new Date(t.createdAt).toLocaleString(),
+    icon: t.type === "credit" ? "received" : "sent",
+  }))
 
-  const transactions = [
-    {
-      id: 1,
-      type: "received",
-      title: "Jade Adeleye",
-      description: "Bank Transfer • Korapay",
-      amount: 50000,
-      date: "Yesterday, 6:20 PM",
-      icon: "received",
-    },
-    {
-      id: 2,
-      type: "sent",
-      title: "Jumia Order",
-      description: "Online Shopping",
-      amount: -18300,
-      date: "Yesterday, 2:15 PM",
-      icon: "shopping",
-    },
-    {
-      id: 3,
-      type: "sent",
-      title: "Uber Ride",
-      description: "Transportation",
-      amount: -2500,
-      date: "Today, 8:42 PM",
-      icon: "sent",
-    },
-    {
-      id: 4,
-      type: "received",
-      title: "David Okonkwo",
-      description: "Bank Transfer",
-      amount: 15000,
-      date: "2 days ago, 4:30 PM",
-      icon: "received",
-    },
-    {
-      id: 5,
-      type: "sent",
-      title: "Netflix Premium",
-      description: "Subscription",
-      amount: -6500,
-      date: "3 days ago, 9:00 AM",
-      icon: "sent",
-    },
-    {
-      id: 6,
-      type: "sent",
-      title: "Weekly Data Plan",
-      description: "Airtel • Data Bundle",
-      amount: -5000,
-      date: "4 days ago, 11:20 AM",
-      icon: "sent",
-    },
-    {
-      id: 7,
-      type: "received",
-      title: "Salary Payment",
-      description: "Korapay Technologies",
-      amount: 450000,
-      date: "5 days ago, 12:00 PM",
-      icon: "received",
-    },
-    {
-      id: 8,
-      type: "sent",
-      title: "Monthly Rent",
-      description: "Scheduled Payment",
-      amount: -620000,
-      date: "6 days ago, 8:00 AM",
-      icon: "sent",
-    },
-  ]
+  const transactions = mappedLive
 
   const filteredTransactions = transactions.filter((transaction) => {
     if (filterTab === "sent" && transaction.type !== "sent") return false

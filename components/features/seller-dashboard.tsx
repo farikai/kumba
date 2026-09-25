@@ -4,6 +4,7 @@ import { ArrowLeft, Plus, Store, Package, TrendingUp, DollarSign, Edit3, Trash2,
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 
@@ -18,7 +19,9 @@ const categories = [
 ]
 
 export default function SellerDashboard({ onBack, userId }: SellerDashboardProps) {
-  const sellerProfile = useQuery(api.sellers.getProfile, { userId })
+  const { session } = useSession()
+  const token = session?.sessionToken ?? ""
+  const sellerProfile = useQuery(api.sellers.getProfile, token ? { userId, sessionToken: token } : "skip")
   const [view, setView] = useState<"overview" | "register" | "products" | "addProduct" | "orders" | "payouts">("overview")
 
   const registerStore = useMutation(api.sellers.registerStore)
@@ -33,14 +36,15 @@ export default function SellerDashboard({ onBack, userId }: SellerDashboardProps
 
   const sellerId = sellerProfile?._id
 
-  const products = useQuery(api.sellers.listMyProducts, sellerId ? { sellerId } : "skip")
-  const orders = useQuery(api.sellers.getOrders, sellerId ? { sellerId } : "skip")
-  const payouts = useQuery(api.sellers.getPayoutHistory, sellerId ? { sellerId } : "skip")
+  const products = useQuery(api.sellers.listMyProducts, sellerId && token ? { userId, sessionToken: token, sellerId } : "skip")
+  const orders = useQuery(api.sellers.getOrders, sellerId && token ? { userId, sessionToken: token, sellerId } : "skip")
+  const payouts = useQuery(api.sellers.getPayoutHistory, sellerId && token ? { userId, sessionToken: token, sellerId } : "skip")
 
   const handleRegister = async () => {
+    if (!token) return
     setSubmitting(true)
     try {
-      await registerStore({ userId, ...regForm })
+      await registerStore({ userId, sessionToken: token, ...regForm })
       setView("overview")
     } catch (e: any) {
       alert(e.message)
@@ -49,12 +53,13 @@ export default function SellerDashboard({ onBack, userId }: SellerDashboardProps
   }
 
   const handleAddProduct = async () => {
-    if (!sellerId) return
+    if (!sellerId || !token) return
     setSubmitting(true)
     try {
       await addProduct({
         sellerId,
         userId,
+        sessionToken: token,
         name: prodForm.name,
         description: prodForm.description,
         price: Number.parseFloat(prodForm.price),
@@ -73,8 +78,9 @@ export default function SellerDashboard({ onBack, userId }: SellerDashboardProps
   }
 
   const handleDeleteProduct = async (productId: Id<"sellerProducts">) => {
+    if (!token) return
     if (confirm("Delete this product?")) {
-      await removeProduct({ productId })
+      await removeProduct({ userId, sessionToken: token, productId })
     }
   }
 

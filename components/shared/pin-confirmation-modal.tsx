@@ -3,11 +3,20 @@
 import type React from "react"
 
 import { useState, useEffect } from "react"
+import { useMutation } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { X, Check, Bell, Clock } from "lucide-react"
+import { useSession } from "@/components/session-provider"
 
 interface PinConfirmationModalProps {
   isOpen: boolean
   onClose: () => void
+  /** Called after the PIN is verified server-side. Receives the auto-pay
+   *  choice (scheduling UI only). Must perform the real money movement —
+   *  throw to surface the error in the modal instead of "succeeding". */
+  onVerified: (autoPay: boolean) => Promise<void> | void
+  /** Called after onVerified resolves, e.g. to navigate. */
   onSuccess: () => void
   amount: number
   recipient: string
@@ -20,6 +29,7 @@ interface PinConfirmationModalProps {
 export default function PinConfirmationModal({
   isOpen,
   onClose,
+  onVerified,
   onSuccess,
   amount,
   recipient,
@@ -32,6 +42,9 @@ export default function PinConfirmationModal({
   const [error, setError] = useState("")
   const [isVerifying, setIsVerifying] = useState(false)
   const [enableAutoPay, setEnableAutoPay] = useState(false)
+
+  const { session } = useSession()
+  const verifyPinStrict = useMutation(api.users.verifyPinStrict)
 
   useEffect(() => {
     if (isOpen) {
@@ -70,28 +83,25 @@ export default function PinConfirmationModal({
     setIsVerifying(true)
     setError("")
 
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-
-    if (pinValue === "1234") {
-      if (isScheduled && enableAutoPay) {
-        const autoPayData = {
-          recipient,
-          amount,
-          scheduleDate,
-          frequency,
-          enabled: true,
-        }
-        localStorage.setItem(`autopay_${recipient}`, JSON.stringify(autoPayData))
-        console.log("[v0] Auto-pay enabled for scheduled payment:", autoPayData)
-      }
+    try {
+      if (!session) throw new Error("You are not logged in. Restart the app and log in again.")
+      // Server-side verification against the salted hash (attempt-limited).
+      await verifyPinStrict({
+        userId: session.userId as Id<"users">,
+        sessionToken: session.sessionToken,
+        pin: pinValue,
+      })
+      // PIN is valid — perform the real operation. Any failure is shown
+      // here instead of faking success.
+      await onVerified(isScheduled && enableAutoPay)
       onSuccess()
-    } else {
-      setError("Incorrect PIN. Try again.")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Verification failed. Try again.")
       setPin(["", "", "", ""])
       document.getElementById("pin-0")?.focus()
+    } finally {
+      setIsVerifying(false)
     }
-
-    setIsVerifying(false)
   }
 
   if (!isOpen) return null

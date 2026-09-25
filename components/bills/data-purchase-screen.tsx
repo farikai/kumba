@@ -1,8 +1,12 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation, useAction } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { ArrowLeft, Phone, Wifi, Calendar, Repeat } from "lucide-react"
 import PinConfirmationModal from "../shared/pin-confirmation-modal"
+import { useSession } from "@/components/session-provider"
 
 interface DataPurchaseScreenProps {
   onBack: () => void
@@ -17,6 +21,13 @@ export default function DataPurchaseScreen({ onBack, onComplete }: DataPurchaseS
   const [isScheduled, setIsScheduled] = useState(false)
   const [scheduleDate, setScheduleDate] = useState("")
   const [frequency, setFrequency] = useState<"once" | "daily" | "weekly" | "monthly">("once")
+
+  const { session } = useSession()
+  const createScheduled = useMutation(api.scheduled.create)
+  const apiAny = api as any
+  // Single money path: provider leg + wallet debit happen together inside
+  // the action, so users never pay for data that was never delivered.
+  const buyData = useAction(apiAny.actions["9psb"].buyData)
 
   const networks = [
     { id: "mtn", name: "MTN", logo: "📱", color: "#FFCB05" },
@@ -55,6 +66,46 @@ export default function DataPurchaseScreen({ onBack, onComplete }: DataPurchaseS
   const handleProceed = () => {
     if (!selectedNetwork || !phoneNumber || !selectedPlan) return
     setShowPinModal(true)
+  }
+
+  /** Real debit (or real scheduled payment) after server-side PIN check. */
+  const handleVerified = async (autoPay: boolean) => {
+    if (!session) throw new Error("You are not logged in.")
+    if (!selectedPlan) throw new Error("Select a data plan")
+    const userId = session.userId as Id<"users">
+    const networkName = networks.find((n) => n.id === selectedNetwork)?.name ?? selectedNetwork
+    const value = Number(selectedPlan.price)
+    if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid plan price")
+    // One key per verified submission: retries dedup on both the debit and
+    // the scheduled-create paths.
+    const idempotencyKey = `BILL-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    if (isScheduled && autoPay) {
+      const start = scheduleDate ? new Date(scheduleDate).getTime() : Date.now()
+      if (!Number.isFinite(start) || start <= 0) throw new Error("Invalid schedule date")
+      await createScheduled({
+        userId,
+        sessionToken: session.sessionToken,
+        recipientName: `${networkName} Data - ${phoneNumber}`,
+        amount: value,
+        frequency,
+        nextPaymentDate: start,
+        description: `Data bundle ${selectedPlan.size} - ${phoneNumber}`,
+        idempotencyKey,
+      })
+      return
+    }
+    const result = await buyData({
+      userId,
+      sessionToken: session.sessionToken,
+      network: selectedNetwork as "mtn" | "airtel" | "glo" | "9mobile",
+      phoneNumber,
+      planId: String(selectedPlan.id),
+      amount: value,
+      idempotencyKey,
+    })
+    if (!result.success) {
+      throw new Error(result.error?.message ?? "Data purchase failed")
+    }
   }
 
   const handleSuccess = () => {
@@ -253,6 +304,7 @@ export default function DataPurchaseScreen({ onBack, onComplete }: DataPurchaseS
       <PinConfirmationModal
         isOpen={showPinModal}
         onClose={() => setShowPinModal(false)}
+        onVerified={handleVerified}
         onSuccess={handleSuccess}
         amount={selectedPlan?.price || 0}
         recipient={`${networks.find((n) => n.id === selectedNetwork)?.name} Data - ${phoneNumber}`}

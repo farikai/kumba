@@ -1,4 +1,5 @@
 import { generateEmbedding } from "./embeddings"
+import { cosineSimilarity } from "./embeddings"
 
 export interface FinancialContext {
   user: { name: string; phone: string; tag?: string } | null
@@ -9,6 +10,7 @@ export interface FinancialContext {
   totalReceivedThisMonth: number
   beneficiaries: { name: string; bankName: string; accountNumber: string }[]
   scheduledPayments: { recipientName: string; amount: number; frequency: string; nextDate: number; isActive: boolean }[]
+  budgets: { category: string; amount: number; period: string }[]
   savingsStreak: number
   monthlyBudget: number
   budgetUsed: number
@@ -20,6 +22,7 @@ interface Transaction {
   type: "credit" | "debit" | "transfer"
   amount: number
   description: string
+  category?: string
   status: string
   recipientName?: string
   createdAt: number
@@ -27,17 +30,19 @@ interface Transaction {
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_SITE_URL
 
-export async function buildFinancialContext(userId: string): Promise<FinancialContext> {
+export async function buildFinancialContext(userId: string, sessionToken?: string): Promise<FinancialContext> {
   const empty = getEmptyContext()
   if (!convexUrl) return empty
 
   try {
-    const [userRaw, balance, transactions, beneficiaries, scheduled] = await Promise.all([
-      fetchFromConvex(convexUrl, "users:getById", { userId }),
-      fetchFromConvex(convexUrl, "wallet:getBalance", { userId }),
-      fetchFromConvex(convexUrl, "wallet:getTransactions", { userId, limit: 50 }),
-      fetchFromConvex(convexUrl, "beneficiaries:getAll", { userId }),
-      fetchFromConvex(convexUrl, "scheduled:list", { userId }),
+    const withAuth = sessionToken ? { sessionToken } : {}
+    const [userRaw, balance, transactions, beneficiaries, scheduled, budgets] = await Promise.all([
+      fetchFromConvex(convexUrl, "users:getById", { userId, ...withAuth }),
+      fetchFromConvex(convexUrl, "wallet:getBalance", { userId, ...withAuth }),
+      fetchFromConvex(convexUrl, "wallet:getTransactions", { userId, limit: 50, ...withAuth }),
+      fetchFromConvex(convexUrl, "beneficiaries:getAll", { userId, ...withAuth }),
+      fetchFromConvex(convexUrl, "scheduled:list", { userId, ...withAuth }),
+      fetchFromConvex(convexUrl, "budgets:list", { userId, ...withAuth }).catch(() => []),
     ])
 
     const user = userRaw as { name: string; phone: string; tag?: string } | null
@@ -50,12 +55,16 @@ export async function buildFinancialContext(userId: string): Promise<FinancialCo
 
     const byCategory: Record<string, number> = {}
     for (const t of debits) {
-      const cat = getCategory(t.description)
+      const cat = (t as any).category ?? getCategory(t.description)
       byCategory[cat] = (byCategory[cat] ?? 0) + t.amount
     }
 
     const totalSpent = debits.reduce((s, t) => s + t.amount, 0)
     const totalReceived = credits.reduce((s, t) => s + t.amount, 0)
+    const budgetList = (budgets as { category: string; amount: number; period: string }[]) ?? []
+    const realMonthlyBudget = budgetList
+      .filter((b) => b.period === "monthly")
+      .reduce((s, b) => s + b.amount, 0)
 
     const ctx: FinancialContext = {
       user,
@@ -66,14 +75,16 @@ export async function buildFinancialContext(userId: string): Promise<FinancialCo
       totalReceivedThisMonth: totalReceived,
       beneficiaries: beneficiaries as any[],
       scheduledPayments: scheduled as any[],
+      budgets: budgetList,
       savingsStreak: calculateSavingsStreak(txs),
-      monthlyBudget: 300000,
+      // Prefer the user's REAL budgets over the old hardcoded ₦300,000.
+      monthlyBudget: realMonthlyBudget > 0 ? realMonthlyBudget : 300000,
       budgetUsed: totalSpent,
       semanticChunks: [],
     }
 
     try {
-      ctx.semanticChunks = await querySemanticRag(userId, txs)
+      ctx.semanticChunks = await querySemanticRag(userId, sessionToken, txs)
     } catch {
       ctx.semanticChunks = []
     }
@@ -84,22 +95,25 @@ export async function buildFinancialContext(userId: string): Promise<FinancialCo
   }
 }
 
-async function querySemanticRag(userId: string, _transactions: Transaction[]): Promise<string[]> {
+async function querySemanticRag(userId: string, sessionToken: string | undefined, _transactions: Transaction[]): Promise<string[]> {
   if (!convexUrl) return []
+  if (!sessionToken) return []
 
   try {
     const res = await fetch(`${convexUrl}/api/query/rag:getAllChunks`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ args: { userId } }),
+      body: JSON.stringify({ args: { userId, sessionToken } }),
     })
     if (!res.ok) return []
-    const { value: chunks } = await res.json()
+    const json = await res.json()
+    const chunks = (json.value ?? json) as any[]
     if (!chunks || (chunks as any[]).length === 0) return []
 
     const queryEmbedding = await generateEmbedding("User financial information, transactions, beneficiaries, and account overview")
 
     const scored = (chunks as any[])
+      .filter((c: any) => Array.isArray(c.embedding) && c.embedding.length > 0)
       .map((c: any) => ({
         content: c.content,
         score: cosineSimilarity(queryEmbedding, c.embedding),
@@ -111,16 +125,6 @@ async function querySemanticRag(userId: string, _transactions: Transaction[]): P
   } catch {
     return []
   }
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, na = 0, nb = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb))
 }
 
 export function formatFinancialContext(ctx: FinancialContext): string {
@@ -164,6 +168,14 @@ export function formatFinancialContext(ctx: FinancialContext): string {
     }
   }
 
+  if (ctx.budgets.length > 0) {
+    lines.push("")
+    lines.push("BUDGETS SET BY USER (use these, not the fallback monthly figure):")
+    for (const b of ctx.budgets) {
+      lines.push(`  • ${b.category}: ₦${b.amount.toLocaleString()} / ${b.period}`)
+    }
+  }
+
   if (ctx.scheduledPayments.length > 0) {
     lines.push("")
     lines.push("SCHEDULED PAYMENTS:")
@@ -194,6 +206,7 @@ function getEmptyContext(): FinancialContext {
     totalReceivedThisMonth: 0,
     beneficiaries: [],
     scheduledPayments: [],
+    budgets: [],
     savingsStreak: 0,
     monthlyBudget: 300000,
     budgetUsed: 0,
@@ -207,8 +220,15 @@ async function fetchFromConvex(convexUrl: string, path: string, args: Record<str
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ args }),
   })
-  if (!res.ok) throw new Error(`Convex query ${path} failed: ${res.status}`)
-  return res.json()
+  if (!res.ok) {
+    // Auth-gated queries fail without a session — callers that pass a
+    // sessionToken treat this as fatal; background best-effort callers
+    // catch and fall back to the empty context.
+    throw new Error(`Convex query ${path} failed: ${res.status}`)
+  }
+  const json = await res.json()
+  // Convex REST wraps results as { value: ... }
+  return (json as any).value ?? json
 }
 
 function getCategory(description: string): string {

@@ -329,13 +329,18 @@ export class NinePsbClient {
     }
 
     if (endpoint.includes("/payout/account-lookup")) {
-      const mockNames = ["OKAFOR JOY CHINWE", "ADEBAYO OLUWASEUN JAMES", "MUSA ABDULLAHI", "NWACHUKWU EMMANUEL"]
+      // SANDBOX HONESTY: there is no name-enquiry provider in sandbox mode,
+      // so we must NOT invent an account holder name. Previously this
+      // returned a random Nigerian name, which the UI presented as a
+      // "verified" account holder — a social-engineering hazard. In live
+      // mode the real provider response flows through request() above.
+      const acct = String(body.accountNumber ?? "")
       return {
         success: true,
         data: {
           accountNumber: body.accountNumber,
           bankCode: body.bankCode,
-          accountName: mockNames[Math.floor(Math.random() * mockNames.length)],
+          accountName: `UNVERIFIED (sandbox) ••${acct.slice(-4)}`,
         } as T,
         reference: ref,
       }

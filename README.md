@@ -81,7 +81,7 @@ pnpm dev
 
 ### Environment Variables
 
-Create `.env.local`:
+Create `.env.local` (see `.env.example`):
 
 ```
 AI_API_KEY=sk-or-v1-...
@@ -91,6 +91,25 @@ NEXT_PUBLIC_CONVEX_SITE_URL=https://academic-goat-377.convex.site
 NINE_PSB_API_KEY=your_9psb_key
 NINE_PSB_MODE=sandbox
 ```
+
+### Auth model (building stage)
+
+- Phone + transaction PIN is the credential. PINs are stored as salted
+  SHA-256 hashes only; login/register issue a random session token.
+- Every user-scoped Convex query/mutation/action verifies
+  `(userId, sessionToken)` server-side — there is no anonymous access.
+- PIN verification is attempt-limited (5 tries → 5-minute lockout).
+- OTP and KYC screens are self-attestation UX only until SMS/KYC
+  providers are wired; they confer no authentication.
+
+### Build-stage honesty rules
+
+- 9PSB runs in **sandbox mock mode**: transfers/VAS always "succeed"
+  locally and account lookup returns `UNVERIFIED (sandbox)` — never a
+  real holder name. No Anchor integration exists.
+- Wallet top-ups are **demo credits** (no bank rail / webhook).
+- Balances are a single mutable value per wallet (no double-entry
+  ledger yet); money mutations accept idempotency keys.
 
 ### Setting Up Convex
 
@@ -112,8 +131,8 @@ app/
     kumba-chat/route.ts    — AI chat endpoint with tool execution
     kumba-execute/route.ts — PIN-verified write operations
     kumba-ingest/route.ts  — RAG embedding ingestion
-  page.tsx                 — Onboarding flow (splash → PIN → dashboard)
-  landing/page.tsx         — Landing page
+  page.tsx                 — Landing page
+  app/page.tsx             — Onboarding flow (splash → PIN → dashboard)
 components/
   dashboard/               — Main app dashboard
   features/                — Feature screens (budget, shop, seller, etc.)
@@ -139,7 +158,3 @@ lib/
   rag-ingestion.ts         — Chunking logic for embedding
   embeddings.ts            — OpenRouter embedding client
 ```
-
-## Pre-existing Build Errors
-
-- `app/landing/page.tsx:107` — Framer Motion `ease` type issue (pre-existing, unrelated to app features)

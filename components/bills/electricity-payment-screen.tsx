@@ -1,8 +1,12 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation, useAction } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { ArrowLeft, Zap, Calendar, Repeat } from "lucide-react"
 import PinConfirmationModal from "../shared/pin-confirmation-modal"
+import { useSession } from "@/components/session-provider"
 
 interface ElectricityPaymentScreenProps {
   onBack: () => void
@@ -20,6 +24,13 @@ export default function ElectricityPaymentScreen({ onBack, onComplete }: Electri
   const [scheduleDate, setScheduleDate] = useState("")
   const [frequency, setFrequency] = useState<"once" | "daily" | "weekly" | "monthly">("monthly")
 
+  const { session } = useSession()
+  const createScheduled = useMutation(api.scheduled.create)
+  const apiAny = api as any
+  // Single money path: provider leg + wallet debit happen together inside
+  // the action, so users never pay for electricity that was never vended.
+  const payElectricity = useAction(apiAny.actions["9psb"].payElectricity)
+
   const providers = [
     { id: "ikedc", name: "IKEDC", fullName: "Ikeja Electric" },
     { id: "ekedc", name: "EKEDC", fullName: "Eko Electric" },
@@ -34,14 +45,53 @@ export default function ElectricityPaymentScreen({ onBack, onComplete }: Electri
   const handleVerifyMeter = async () => {
     if (!selectedProvider || !meterNumber || meterNumber.length < 10) return
 
-    // Simulate meter verification
-    await new Promise((resolve) => setTimeout(resolve, 1000))
-    setVerifiedName("John Doe - Block 5, Flat 3")
+    // DEMO ONLY: no meter-validation provider is wired, so we cannot verify
+    // the meter holder. Label it honestly instead of inventing a name.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    setVerifiedName(`Unverified meter ••${meterNumber.slice(-4)} (demo — not validated)`)
   }
 
   const handleProceed = () => {
     if (!selectedProvider || !meterNumber || !amount || !verifiedName) return
     setShowPinModal(true)
+  }
+
+  /** Real debit (or real scheduled payment) after server-side PIN check. */
+  const handleVerified = async (autoPay: boolean) => {
+    if (!session) throw new Error("You are not logged in.")
+    const userId = session.userId as Id<"users">
+    const providerName = providers.find((p) => p.id === selectedProvider)?.name ?? selectedProvider
+    const value = Number(amount)
+    if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid amount")
+    const idempotencyKey = `BILL-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    if (isScheduled && autoPay) {
+      const start = scheduleDate ? new Date(scheduleDate).getTime() : Date.now()
+      if (!Number.isFinite(start) || start <= 0) throw new Error("Invalid schedule date")
+      await createScheduled({
+        userId,
+        sessionToken: session.sessionToken,
+        recipientName: `Electricity - ${providerName}`,
+        amount: value,
+        frequency,
+        nextPaymentDate: start,
+        description: `Electricity bill - meter ${meterNumber}`,
+        idempotencyKey,
+      })
+      return
+    }
+    const result = await payElectricity({
+      userId,
+      sessionToken: session.sessionToken,
+      providerCode: selectedProvider,
+      meterNumber,
+      amount: value,
+      meterType,
+      phoneNumber: session.phone,
+      idempotencyKey,
+    })
+    if (!result.success) {
+      throw new Error(result.error?.message ?? "Electricity payment failed")
+    }
   }
 
   const handleSuccess = () => {
@@ -266,6 +316,7 @@ export default function ElectricityPaymentScreen({ onBack, onComplete }: Electri
       <PinConfirmationModal
         isOpen={showPinModal}
         onClose={() => setShowPinModal(false)}
+        onVerified={handleVerified}
         onSuccess={handleSuccess}
         amount={Number(amount)}
         recipient={`${providers.find((p) => p.id === selectedProvider)?.fullName} - ${meterNumber}`}

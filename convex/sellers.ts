@@ -1,9 +1,13 @@
 import { query, mutation } from "./_generated/server"
 import { v } from "convex/values"
+import { requireOwner, requireSession } from "./lib/auth"
+
+const sessionArgs = { userId: v.id("users"), sessionToken: v.string() }
 
 export const getProfile = query({
-  args: { userId: v.id("users") },
+  args: sessionArgs,
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     return await ctx.db
       .query("sellers")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
@@ -14,6 +18,7 @@ export const getProfile = query({
 export const registerStore = mutation({
   args: {
     userId: v.id("users"),
+    sessionToken: v.string(),
     storeName: v.string(),
     description: v.optional(v.string()),
     phone: v.string(),
@@ -21,6 +26,9 @@ export const registerStore = mutation({
     address: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
+    if (!args.storeName.trim()) throw new Error("Store name is required")
+    if (!args.address.trim()) throw new Error("Address is required")
     const existing = await ctx.db
       .query("sellers")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
@@ -29,11 +37,11 @@ export const registerStore = mutation({
 
     return await ctx.db.insert("sellers", {
       userId: args.userId,
-      storeName: args.storeName,
+      storeName: args.storeName.trim(),
       description: args.description,
       phone: args.phone,
       email: args.email,
-      address: args.address,
+      address: args.address.trim(),
       status: "pending",
       kycVerified: false,
       commissionRate: 5,
@@ -43,8 +51,23 @@ export const registerStore = mutation({
   },
 })
 
+async function ownSeller(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  userId: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sellerId: any,
+) {
+  const seller = await ctx.db.get(sellerId)
+  if (!seller || seller.userId !== userId) throw new Error("Not found: seller")
+  return seller
+}
+
 export const updateProfile = mutation({
   args: {
+    userId: v.id("users"),
+    sessionToken: v.string(),
     sellerId: v.id("sellers"),
     storeName: v.optional(v.string()),
     description: v.optional(v.string()),
@@ -56,14 +79,18 @@ export const updateProfile = mutation({
     accountName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { sellerId, ...updates } = args
+    await requireSession(ctx, args.userId, args.sessionToken)
+    await ownSeller(ctx, args.userId, args.sellerId)
+    const { sellerId, userId: _u, sessionToken: _s, ...updates } = args
     await ctx.db.patch(sellerId, updates)
   },
 })
 
 export const listMyProducts = query({
-  args: { sellerId: v.id("sellers") },
+  args: { userId: v.id("users"), sessionToken: v.string(), sellerId: v.id("sellers") },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
+    await ownSeller(ctx, args.userId, args.sellerId)
     return await ctx.db
       .query("sellerProducts")
       .withIndex("by_sellerId", (q) => q.eq("sellerId", args.sellerId))
@@ -74,8 +101,9 @@ export const listMyProducts = query({
 
 export const addProduct = mutation({
   args: {
-    sellerId: v.id("sellers"),
     userId: v.id("users"),
+    sessionToken: v.string(),
+    sellerId: v.id("sellers"),
     name: v.string(),
     description: v.string(),
     price: v.number(),
@@ -86,8 +114,12 @@ export const addProduct = mutation({
     tags: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    const seller = await ctx.db.get(args.sellerId)
-    if (!seller) throw new Error("Seller not found")
+    await requireSession(ctx, args.userId, args.sessionToken)
+    if (!Number.isFinite(args.price) || args.price <= 0)
+      throw new Error("Price must be greater than zero");
+    if (!Number.isInteger(args.stock) || args.stock < 0)
+      throw new Error("Stock must be a non-negative integer");
+    const seller = await ownSeller(ctx, args.userId, args.sellerId)
 
     const productId = await ctx.db.insert("sellerProducts", {
       sellerId: args.sellerId,
@@ -99,13 +131,19 @@ export const addProduct = mutation({
       category: args.category,
       images: args.images,
       stock: args.stock,
-      status: "pending_review",
+      // Building stage: sellers self-publish (no admin review queue
+      // exists yet). Publish immediately with attribution instead of
+      // pretending a review step gates visibility.
+      status: "active",
       commissionRate: seller.commissionRate,
       tags: args.tags,
+      approvedBy: args.userId,
+      approvedAt: Date.now(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     })
 
+    // Published items mirror straight into the public catalog.
     await ctx.db.insert("products", {
       name: args.name,
       price: args.price,
@@ -125,6 +163,8 @@ export const addProduct = mutation({
 
 export const updateProduct = mutation({
   args: {
+    userId: v.id("users"),
+    sessionToken: v.string(),
     productId: v.id("sellerProducts"),
     name: v.optional(v.string()),
     description: v.optional(v.string()),
@@ -136,7 +176,14 @@ export const updateProduct = mutation({
     tags: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
-    const { productId, ...updates } = args
+    await requireSession(ctx, args.userId, args.sessionToken)
+    if (args.price !== undefined && (!Number.isFinite(args.price) || args.price <= 0))
+      throw new Error("Price must be greater than zero");
+    if (args.stock !== undefined && (!Number.isInteger(args.stock) || args.stock < 0))
+      throw new Error("Stock must be a non-negative integer");
+    const { productId, userId, sessionToken: _s, ...updates } = args
+    const sp0 = await ctx.db.get(productId)
+    requireOwner(sp0, userId, "product")
     await ctx.db.patch(productId, { ...updates, updatedAt: Date.now() })
     const sp = await ctx.db.get(productId)
     if (sp) {
@@ -149,21 +196,56 @@ export const updateProduct = mutation({
         await ctx.db.patch(platformProduct._id, {
           name: updates.name ?? platformProduct.name,
           price: updates.price ?? platformProduct.price,
-          inStock: updates.stock ? updates.stock > 0 : platformProduct.inStock,
+          originalPrice: updates.originalPrice ?? platformProduct.originalPrice,
+          category: updates.category ?? platformProduct.category,
+          store: sp.sellerId ? platformProduct.store : platformProduct.store,
+          inStock: updates.stock !== undefined ? updates.stock > 0 && sp.status === "active" : platformProduct.inStock,
         })
       }
     }
   },
 })
 
-export const removeProduct = mutation({
-  args: { productId: v.id("sellerProducts") },
+// BUILDING-STAGE NOTE: publishing is by the seller themselves (no admin
+// review queue exists yet) — addProduct() already publishes. This
+// (re)publishes an item (e.g. after edits or restock) and records WHO
+// published it, so future moderation has an attribution trail. Previously
+// ANY client could approve ANY product; now ownership is enforced.
+export const approveProduct = mutation({
+  args: { userId: v.id("users"), sessionToken: v.string(), productId: v.id("sellerProducts") },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     const sp = await ctx.db.get(args.productId)
-    if (!sp) throw new Error("Product not found")
+    requireOwner(sp, args.userId, "product")
+    await ownSeller(ctx, args.userId, sp!.sellerId)
+    await ctx.db.patch(args.productId, { status: "active", approvedBy: args.userId, approvedAt: Date.now(), updatedAt: Date.now() })
+    const mirror = await ctx.db
+      .query("products")
+      .withIndex("by_sellerId", (q) => q.eq("sellerId", sp!.sellerId))
+      .filter((q) => q.eq(q.field("sellerProductId"), args.productId))
+      .first()
+    if (mirror) {
+      await ctx.db.patch(mirror._id, {
+        name: sp!.name,
+        price: sp!.price,
+        originalPrice: sp!.originalPrice,
+        category: sp!.category,
+        inStock: sp!.stock > 0,
+      })
+    }
+    return { success: true }
+  },
+})
+
+export const removeProduct = mutation({
+  args: { userId: v.id("users"), sessionToken: v.string(), productId: v.id("sellerProducts") },
+  handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
+    const sp = await ctx.db.get(args.productId)
+    requireOwner(sp, args.userId, "product")
     const platformProduct = await ctx.db
       .query("products")
-      .withIndex("by_sellerId", (q) => q.eq("sellerId", sp.sellerId))
+      .withIndex("by_sellerId", (q) => q.eq("sellerId", sp!.sellerId))
       .filter((q) => q.eq(q.field("sellerProductId"), args.productId))
       .first()
     if (platformProduct) await ctx.db.delete(platformProduct._id)
@@ -172,21 +254,36 @@ export const removeProduct = mutation({
 })
 
 export const getOrders = query({
-  args: { sellerId: v.id("sellers") },
+  args: { userId: v.id("users"), sessionToken: v.string(), sellerId: v.id("sellers") },
   handler: async (ctx, args) => {
-    const seller = await ctx.db.get(args.sellerId)
+    await requireSession(ctx, args.userId, args.sessionToken)
+    const seller = await ownSeller(ctx, args.userId, args.sellerId)
     if (!seller) return []
-    return await ctx.db
+    // Join on sellerId (server-derived at order time). The store-name
+    // query below only covers legacy orders placed before linkage
+    // existed — storeName is NOT unique, so it is never the authority.
+    const linked = await ctx.db
       .query("orders")
-      .filter((q) => q.eq(q.field("store"), seller.storeName))
+      .withIndex("by_sellerId", (q) => q.eq("sellerId", args.sellerId))
       .order("desc")
       .take(100)
+    const legacy = await ctx.db
+      .query("orders")
+      .withIndex("by_store", (q) => q.eq("store", seller.storeName))
+      .order("desc")
+      .take(100)
+    const seen = new Set(linked.map((o) => o._id))
+    const merged = [...linked, ...legacy.filter((o) => !o.sellerId && !seen.has(o._id))]
+    merged.sort((a, b) => b.createdAt - a.createdAt)
+    return merged.slice(0, 100)
   },
 })
 
 export const getPayoutHistory = query({
-  args: { sellerId: v.id("sellers") },
+  args: { userId: v.id("users"), sessionToken: v.string(), sellerId: v.id("sellers") },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
+    await ownSeller(ctx, args.userId, args.sellerId)
     return await ctx.db
       .query("sellerPayouts")
       .withIndex("by_sellerId", (q) => q.eq("sellerId", args.sellerId))

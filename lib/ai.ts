@@ -52,6 +52,7 @@ export const READ_TOOLS = new Set([
   "check_balance", "get_transactions", "get_spending_breakdown",
   "lookup_account", "search_products", "get_budget_analysis",
   "get_tax_estimate", "analyze_financial_health", "get_savings_goals",
+  "find_beneficiary",
 ])
 
 export const NAV_TOOLS = new Set([
@@ -194,7 +195,7 @@ export const KUMBA_TOOLS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "schedule_payment",
-      description: "Schedule a recurring or one-time future payment",
+      description: "Schedule a recurring or one-time future payment. The schedule is only persisted after the user confirms with their PIN.",
       parameters: {
         type: "object",
         properties: {
@@ -202,6 +203,7 @@ export const KUMBA_TOOLS: ToolDefinition[] = [
           amount: { type: "number" },
           frequency: { type: "string", enum: ["once", "daily", "weekly", "monthly"] },
           description: { type: "string" },
+          startDate: { type: "string", description: "ISO date for the first payment (defaults to tomorrow)" },
         },
         required: ["recipientName", "amount", "frequency"],
       },
@@ -234,6 +236,7 @@ export const KUMBA_TOOLS: ToolDefinition[] = [
           store: { type: "string", description: "Store name (Jumia, Konga, Jiji)" },
           category: { type: "string", description: "Product category" },
           deliveryAddress: { type: "string", description: "Optional delivery address" },
+          sellerProductId: { type: "string", description: "Marketplace item id from search_products results, when present. Pass through verbatim so stock and seller payout are handled." },
         },
         required: ["productName", "productPrice", "store", "category"],
       },
@@ -363,16 +366,98 @@ export const KUMBA_TOOLS: ToolDefinition[] = [
       parameters: { type: "object", properties: {}, required: [] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "find_beneficiary",
+      description: "Fuzzy-search for a saved beneficiary by name. Returns exact matches AND suggestions when the name isn't found exactly. Use this before send_money to figure out who the user means.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "The name or partial name to search for" },
+        },
+        required: ["name"],
+      },
+    },
+  },
 ]
+
+// ─── Fuzzy name matching helpers ──────────────────────────────
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
+  for (let i = 0; i <= m; i++) dp[i][0] = i
+  for (let j = 0; j <= n; j++) dp[0][j] = j
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
+  return dp[m][n]
+}
+
+function normalizeName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "")
+}
+
+function nameSimilarity(query: string, target: string): number {
+  const q = normalizeName(query)
+  const t = normalizeName(target)
+  if (q === t) return 1
+  if (t.includes(q) || q.includes(t)) return 0.9
+  const dist = levenshtein(q, t)
+  const maxLen = Math.max(q.length, t.length)
+  return Math.max(0, 1 - dist / maxLen)
+}
+
+function phoneticScore(name: string): string {
+  const n = normalizeName(name)
+  const map: Record<string, string> = { a: "", e: "", i: "", o: "", u: "", h: "", w: "", y: "" }
+  let result = n.charAt(0) || ""
+  for (let i = 1; i < n.length; i++) {
+    const c = n[i]
+    if (!map[c]) result += c
+  }
+  return result
+}
+
+export function fuzzyMatchBeneficiary(
+  query: string,
+  beneficiaries: { name: string; bankName?: string; accountNumber?: string }[],
+): { exact: typeof beneficiaries; suggestions: typeof beneficiaries; didYouMean: string | null } {
+  const q = normalizeName(query)
+  const scored = beneficiaries.map((b) => ({
+    beneficiary: b,
+    nameScore: nameSimilarity(q, normalizeName(b.name)),
+    phoneticScore: nameSimilarity(phoneticScore(q), phoneticScore(b.name)),
+  }))
+
+  const exact = scored.filter((s) => s.nameScore >= 0.9).map((s) => s.beneficiary)
+  const phonetic = scored.filter((s) => s.nameScore < 0.9 && s.phoneticScore >= 0.7).map((s) => s.beneficiary)
+  const partial = scored.filter((s) => s.phoneticScore < 0.7 && s.nameScore >= 0.4).map((s) => s.beneficiary)
+
+  let didYouMean: string | null = null
+  if (exact.length === 0 && scored.length > 0) {
+    const best = scored.reduce((a, b) => (a.nameScore > b.nameScore ? a : b))
+    if (best.nameScore > 0.3) didYouMean = best.beneficiary.name
+  }
+
+  return {
+    exact,
+    suggestions: [...exact, ...phonetic, ...partial].slice(0, 5),
+    didYouMean,
+  }
+}
 
 // ─── Tool executors (map tool name → handler) ──────────────────
 export type ToolContext = {
   userId: string
+  sessionToken?: string
+  budgets?: { category: string; amount: number; period: string }[]
   fetchUserData: () => Promise<{
     balance: number
     transactions: any[]
     beneficiaries: any[]
     scheduledPayments: any[]
+    budgets: { category: string; amount: number; period: string }[]
     totalSpentThisMonth: number
     totalReceivedThisMonth: number
     spendingByCategory: Record<string, number>
@@ -385,6 +470,13 @@ export async function executeToolCall(
 ): Promise<string> {
   const args = JSON.parse(toolCall.function.arguments)
   const { userId } = ctx
+
+  const requirePositive = (n: unknown, label = "amount") => {
+    if (!Number.isFinite(n as number) || (n as number) <= 0)
+      throw new Error(`${label} must be greater than zero`);
+  };
+  const uniqueRef = (prefix: string) =>
+    `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
   switch (toolCall.function.name) {
     case "check_balance": {
@@ -411,6 +503,11 @@ export async function executeToolCall(
     }
 
     case "send_money": {
+      requirePositive(args.amount);
+      const data = await ctx.fetchUserData()
+      if (data.balance < args.amount) {
+        return JSON.stringify({ success: false, error: "Insufficient balance", balance: data.balance, needed: args.amount })
+      }
       const result = await ninePsb.transfer({
         amount: args.amount,
         currency: "NGN",
@@ -418,39 +515,54 @@ export async function executeToolCall(
         bankCode: args.bankCode,
         accountName: args.accountName,
         narration: args.narration ?? "Transfer via Kumba",
-        reference: `KUMBA-${Date.now()}`,
+        reference: uniqueRef("KUMBA"),
       })
-      return JSON.stringify(result)
+      return JSON.stringify({ ...result, note: "Debit must be applied by caller via wallet:sendMoney (category: Transfers)" })
     }
 
     case "buy_airtime": {
+      requirePositive(args.amount);
+      const data = await ctx.fetchUserData()
+      if (data.balance < args.amount) {
+        return JSON.stringify({ success: false, error: "Insufficient balance", balance: data.balance })
+      }
       const result = await ninePsb.buyAirtime({
         network: args.network,
         phoneNumber: args.phoneNumber,
         amount: args.amount,
-        reference: `KUMBA-ATM-${Date.now()}`,
+        reference: uniqueRef("KUMBA-ATM"),
       })
-      return JSON.stringify(result)
+      return JSON.stringify({ ...result, note: "Debit must be applied by caller (category: Airtime)" })
     }
 
     case "buy_data": {
+      requirePositive(args.amount);
+      const data = await ctx.fetchUserData()
+      if (data.balance < args.amount) {
+        return JSON.stringify({ success: false, error: "Insufficient balance", balance: data.balance })
+      }
       const result = await ninePsb.buyData({
         network: args.network,
         phoneNumber: args.phoneNumber,
         planId: args.planId,
-        reference: `KUMBA-DAT-${Date.now()}`,
+        reference: uniqueRef("KUMBA-DAT"),
       })
-      return JSON.stringify(result)
+      return JSON.stringify({ ...result, note: "Debit must be applied by caller (category: Data & Internet)" })
     }
 
     case "pay_electricity":
-      return JSON.stringify(await ninePsb.payElectricity({ ...args, reference: `KUMBA-ELE-${Date.now()}` }))
+      requirePositive(args.amount);
+      return JSON.stringify({ ...(await ninePsb.payElectricity({ ...args, reference: uniqueRef("KUMBA-ELE") })), note: "Debit must be applied by caller (category: Electricity)" })
 
     case "pay_tv":
-      return JSON.stringify(await ninePsb.payTv({ ...args, reference: `KUMBA-TV-${Date.now()}` }))
+      requirePositive(args.amount);
+      return JSON.stringify({ ...(await ninePsb.payTv({ ...args, reference: uniqueRef("KUMBA-TV") })), note: "Debit must be applied by caller (category: TV & Entertainment)" })
 
     case "schedule_payment":
-      return JSON.stringify({ status: "scheduled", ...args })
+      // Honest descriptor only — persistence happens in /api/kumba-execute
+      // AFTER the user confirms with their PIN (it creates a real
+      // scheduledPayments row via scheduled:create).
+      return JSON.stringify({ status: "pending_confirmation", ...args })
 
     case "search_products": {
       try {
@@ -483,6 +595,9 @@ export async function executeToolCall(
           shortfall: args.productPrice - data.balance,
         })
       }
+      if (!ctx.sessionToken) {
+        return JSON.stringify({ success: false, error: "Not authenticated" })
+      }
       const siteUrl = process.env.NEXT_PUBLIC_CONVEX_SITE_URL
       if (siteUrl) {
         try {
@@ -492,11 +607,16 @@ export async function executeToolCall(
             body: JSON.stringify({
               args: {
                 userId: ctx.userId,
+                sessionToken: ctx.sessionToken,
                 productName: args.productName,
                 productPrice: args.productPrice,
                 store: args.store,
                 category: args.category,
                 deliveryAddress: args.deliveryAddress,
+                ...(typeof args.sellerProductId === "string" && args.sellerProductId
+                  ? { sellerProductId: args.sellerProductId }
+                  : {}),
+                idempotencyKey: uniqueRef("AI-ORD"),
               },
             }),
           })
@@ -504,6 +624,8 @@ export async function executeToolCall(
             const { value: result } = await res.json()
             return JSON.stringify(result)
           }
+          const errText = await res.text().catch(() => "")
+          return JSON.stringify({ success: false, error: `Order processing failed: ${errText.slice(0, 200)}` })
         } catch {}
       }
       return JSON.stringify({ success: false, error: "Order processing failed" })
@@ -525,8 +647,38 @@ export async function executeToolCall(
 
     case "get_budget_analysis": {
       const data = await ctx.fetchUserData()
-      const budget = 300000
+      // Use the user's REAL budgets when they exist. The old code ignored
+      // the budgets table entirely and always reported a ₦300,000 budget.
+      const realBudgets = (ctx.budgets ?? data.budgets ?? []) as {
+        category: string; amount: number; period: string
+      }[]
       const used = data.totalSpentThisMonth
+      if (realBudgets.length > 0) {
+        const perCategory = realBudgets.map((b) => {
+          const spent = data.spendingByCategory[b.category] ?? 0
+          return {
+            category: b.category,
+            period: b.period,
+            budget: b.amount,
+            spent,
+            remaining: Math.max(0, b.amount - spent),
+            usagePercent: b.amount > 0 ? Math.round((spent / b.amount) * 100) : 0,
+          }
+        })
+        const totalBudget = realBudgets.reduce((s, b) => s + b.amount, 0)
+        return JSON.stringify({
+          monthlyBudget: totalBudget,
+          totalSpent: used,
+          remaining: Math.max(0, totalBudget - used),
+          overspent: used > totalBudget ? used - totalBudget : 0,
+          usagePercent: totalBudget > 0 ? Math.round((used / totalBudget) * 100) : 0,
+          byCategory: data.spendingByCategory,
+          budgets: perCategory,
+          currency: "NGN",
+          source: "user_budgets",
+        })
+      }
+      const budget = 300000
       const remaining = budget - used
       return JSON.stringify({
         monthlyBudget: budget,
@@ -536,6 +688,8 @@ export async function executeToolCall(
         usagePercent: Math.round((used / budget) * 100),
         byCategory: data.spendingByCategory,
         currency: "NGN",
+        source: "fallback_estimate",
+        note: "No budgets set — ask the user to create one for accurate analysis.",
       })
     }
 
@@ -610,12 +764,20 @@ export async function executeToolCall(
     }
 
     case "create_budget_plan":
-      return JSON.stringify({ status: "budget_created", categoryLimits: args.categoryLimits })
+      // Honest descriptor only — rows are written by /api/kumba-execute
+      // after PIN confirmation (budgets:setBudget per category).
+      return JSON.stringify({ status: "pending_confirmation", categoryLimits: args.categoryLimits })
 
     case "manage_beneficiaries": {
+      // "add" is persisted by /api/kumba-execute after PIN confirmation.
+      // "update" has no safe primitive (it would need an ownership-checked
+      // update mutation) — ask the caller to surface that honestly.
+      if (args.action !== "add" && args.action !== "update") {
+        return JSON.stringify({ success: false, error: `Unknown action: ${args.action}` })
+      }
       const beneficiaries = (await ctx.fetchUserData()).beneficiaries
       return JSON.stringify({
-        status: `${args.action}_beneficiary`,
+        status: `pending_confirmation_${args.action}_beneficiary`,
         name: args.name,
         bankName: args.bankName,
         accountNumber: args.accountNumber,
@@ -628,6 +790,12 @@ export async function executeToolCall(
 
     case "scan_qr_code":
       return JSON.stringify({ navigateTo: "scan", message: "Opening QR scanner" })
+
+    case "find_beneficiary": {
+      const data = await ctx.fetchUserData()
+      const result = fuzzyMatchBeneficiary(args.name, data.beneficiaries)
+      return JSON.stringify({ query: args.name, ...result })
+    }
 
     default:
       return JSON.stringify({ error: `Unknown tool: ${toolCall.function.name}` })

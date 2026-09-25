@@ -1,7 +1,9 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
-import { X, Mic, MicOff, Send, Bot, Loader2, Keyboard, Volume2, Check, AlertCircle } from "lucide-react"
+import { motion } from "framer-motion"
+import { useSession } from "@/components/session-provider"
+import { X, Mic, MicOff, Send, Bot, Loader2, Keyboard, Volume2, Check, AlertCircle, User, ChevronRight } from "lucide-react"
 
 interface KumbaVoiceModalProps {
   isOpen: boolean
@@ -31,11 +33,15 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
   const [isExecuting, setIsExecuting] = useState(false)
   const [executionResult, setExecutionResult] = useState<any>(null)
   const [chatHistory, setChatHistory] = useState<{ role: string; content: string }[]>([])
+  const [suggestions, setSuggestions] = useState<{ type: "beneficiary" | "generic"; items: { id: string; label: string; description?: string }[] } | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const animationRef = useRef<NodeJS.Timeout | null>(null)
   const recognitionRef = useRef<any>(null)
   const synthRef = useRef<SpeechSynthesis | null>(null)
+  const { session } = useSession()
+  const activeUserId = session?.userId ?? userId ?? null
+  const activeToken = session?.sessionToken ?? null
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -110,6 +116,7 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
       setPinError("")
       setIsExecuting(false)
       setExecutionResult(null)
+      setSuggestions(null)
       if (recognitionRef.current) recognitionRef.current.abort()
       if (synthRef.current) synthRef.current.cancel()
     }
@@ -175,6 +182,15 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
   const processWithAI = async (command: string) => {
     setIsProcessing(true)
 
+    if (!activeUserId || !activeToken) {
+      const msg = "You are not logged in, so I can't access your wallet. Please log in first."
+      setKumbaResponse(msg)
+      speakResponse(msg)
+      setShowResponse(true)
+      setIsProcessing(false)
+      return
+    }
+
     try {
       const updatedHistory = [...chatHistory, { role: "user", content: command }]
       setChatHistory(updatedHistory)
@@ -183,7 +199,8 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: userId || "demo-user",
+          userId: activeUserId,
+          sessionToken: activeToken,
           messages: updatedHistory,
         }),
       })
@@ -192,6 +209,23 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
 
       const content = data.content || "Got it!"
+
+      // Parse suggestions from AI response (e.g., numbered list of beneficiaries)
+      const suggestionMatch = content.match(/^(?:Did you mean|Which one|Select|Choose)[^]*?(\d+\.\s[\w\s]+\n?)+/m)
+      if (suggestionMatch) {
+        const lines = (content as string).split("\n").filter((l: string) => /^\d+\.\s/.test(l))
+        if (lines.length >= 2) {
+          setSuggestions({
+            type: "beneficiary",
+            items: lines.map((l: string, i: number) => {
+              const name = l.replace(/^\d+\.\s*/, "").trim()
+              return { id: `opt-${i}`, label: name, description: "Select this person" }
+            }),
+          })
+        }
+      } else {
+        setSuggestions(null)
+      }
 
       if (data.navigateAction) {
         setKumbaResponse(content)
@@ -243,6 +277,10 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
 
   const executeWithPin = async (pin: string) => {
     if (!pendingAction) return
+    if (!activeUserId || !activeToken) {
+      setPinError("Session expired. Log in again.")
+      return
+    }
     setIsExecuting(true)
     setPinError("")
 
@@ -251,7 +289,8 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: userId || "demo-user",
+          userId: activeUserId,
+          sessionToken: activeToken,
           toolCalls: pendingAction.toolCalls,
           pin,
         }),
@@ -272,7 +311,10 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
       setPendingAction(null)
       setPinDots([])
 
-      const successMsg = `Done! The transaction was successful.`
+      const failed = (data.results ?? []).filter((r: any) => r?.result?.success === false || r?.result?.debitError)
+      const successMsg = failed.length === 0
+        ? `Done! The transaction was successful.`
+        : `Some actions failed: ${failed.map((r: any) => r?.result?.error ?? r?.result?.debitError ?? r.name).join("; ")}`
       setKumbaResponse(successMsg)
       speakResponse(successMsg)
       setShowResponse(true)
@@ -289,6 +331,12 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
     if (transcript.trim()) {
       processWithAI(transcript)
     }
+  }
+
+  const handleSelectSuggestion = (label: string) => {
+    setTranscript(label)
+    processWithAI(label)
+    setSuggestions(null)
   }
 
   if (!isOpen) return null
@@ -360,9 +408,46 @@ export default function KumbaVoiceModal({ isOpen, onClose, onNavigate, userId }:
 
         {/* Kumba's response */}
         {showResponse && !pendingAction && !executionResult && (
-          <div className="w-full bg-[#00FF41]/10 border border-[#00FF41]/30 rounded-2xl p-3 mb-4 max-h-32 overflow-y-auto">
+          <motion.div
+            initial={{ opacity: 0, y: 10, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            className="w-full bg-[#00FF41]/10 border border-[#00FF41]/30 rounded-2xl p-3 mb-4 max-h-32 overflow-y-auto"
+          >
             <p className="text-white text-sm leading-relaxed whitespace-pre-line">{kumbaResponse}</p>
-          </div>
+          </motion.div>
+        )}
+
+        {/* Beneficiary / Multi-option Suggestions */}
+        {suggestions && suggestions.items.length >= 2 && !pendingAction && !executionResult && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="w-full space-y-1.5 mb-4"
+          >
+            <p className="text-white/50 text-xs font-medium mb-1 ml-1">
+              {suggestions.type === "beneficiary" ? "Who did you mean?" : "Suggestions"}
+            </p>
+            {suggestions.items.map((item) => (
+              <motion.button
+                key={item.id}
+                whileHover={{ scale: 1.01, x: 4 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => handleSelectSuggestion(item.label)}
+                className="w-full flex items-center gap-3 bg-white/5 hover:bg-[#00FF41]/10 border border-white/10 hover:border-[#00FF41]/40 rounded-xl px-3.5 py-3 transition-all text-left"
+              >
+                <div className="w-8 h-8 rounded-lg bg-[#00FF41]/10 flex items-center justify-center flex-shrink-0">
+                  <User className="text-[#00FF41]" size={14} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white text-sm font-semibold truncate">{item.label}</p>
+                  {item.description && (
+                    <p className="text-white/50 text-xs truncate">{item.description}</p>
+                  )}
+                </div>
+                <ChevronRight className="text-white/30 flex-shrink-0" size={14} />
+              </motion.button>
+            ))}
+          </motion.div>
         )}
 
         {/* Pending action + PIN */}

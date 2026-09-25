@@ -1,0 +1,48 @@
+{
+  "name": "Kumba - AI-Powered Digital Wallet",
+  "short_name": "Kumba",
+  "description": "Send money with voice, QR, or text. Pay bills intelligently. Budget automatically. Powered by AI.",
+  "start_url": "/app",
+  "display": "standalone",
+  "background_color": "#0a1f0f",
+  "theme_color": "#00FF41",
+  "orientation": "portrait",
+  "scope": "/",
+  "lang": "en",
+  "categories": ["finance", "business", "productivity"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-light-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-dark-32x32.png",
+      "sizes": "32x32",
+      "type": "image/png",
+      "theme": "dark"
+    },
+    {
+      "src": "/apple-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/kumba-hero-phone-app.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpeg",
+      "form_factor": "narrow"
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false
+}

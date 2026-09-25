@@ -1,6 +1,8 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback } from "react"
+import { motion, AnimatePresence } from "framer-motion"
+import { useSession } from "@/components/session-provider"
 import {
   ArrowLeft,
   Send,
@@ -10,12 +12,11 @@ import {
   Volume2,
   Loader2,
   Mic,
-  Calendar,
-  ShoppingCart,
-  CreditCard,
   Check,
   Share2,
   AlertCircle,
+  User,
+  ChevronRight,
 } from "lucide-react"
 
 interface KumbaChatScreenProps {
@@ -37,6 +38,10 @@ interface ChatMessage {
     amount: number
     ref: string
     whatsappUrl: string
+  }
+  suggestions?: {
+    type: "beneficiary" | "product" | "generic"
+    items: { id: string; label: string; description?: string; data?: any }[]
   }
 }
 
@@ -63,6 +68,9 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
   const inputRef = useRef<HTMLInputElement>(null)
   const synthRef = useRef<SpeechSynthesis | null>(null)
   const recognitionRef = useRef<any>(null)
+  const { session } = useSession()
+  const activeUserId = session?.userId ?? userId ?? null
+  const activeToken = session?.sessionToken ?? null
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -122,6 +130,18 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
   const sendMessage = async (text: string) => {
     if (!text.trim() || isLoading) return
 
+    if (!activeUserId || !activeToken) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          role: "assistant",
+          content: "You are not logged in, so I can't access your wallet data. Restart the app and log in first.",
+        },
+      ])
+      return
+    }
+
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
       role: "user",
@@ -141,7 +161,8 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: userId || "demo-user",
+          userId: activeUserId,
+          sessionToken: activeToken,
           messages: messages
             .filter((m) => m.id !== "welcome")
             .map((m) => ({ role: m.role, content: m.content })),
@@ -208,6 +229,10 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
 
   const executeWithPin = async (pin: string) => {
     if (!pendingAction) return
+    if (!activeUserId || !activeToken) {
+      setPinError("Session expired. Log in again.")
+      return
+    }
     setIsExecuting(true)
     setPinError("")
 
@@ -216,7 +241,8 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId: userId || "demo-user",
+          userId: activeUserId,
+          sessionToken: activeToken,
           toolCalls: pendingAction.toolCalls,
           pin,
         }),
@@ -233,12 +259,16 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
         throw new Error(data.error || `HTTP ${res.status}`)
       }
 
+      const failed = (data.results ?? []).filter((r: any) => r?.result?.success === false || r?.result?.debitError)
+      const outcome = failed.length === 0
+        ? `✅ Transaction completed successfully!${data.receipt?.whatsappUrl ? `\n\n[Share receipt on WhatsApp](${data.receipt.whatsappUrl})` : ""}`
+        : `⚠️ Some actions failed:\n${failed.map((r: any) => `• ${r.name}: ${r?.result?.error ?? r?.result?.debitError ?? "failed"}`).join("\n")}`
       setMessages((prev) => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "assistant",
-          content: `✅ Transaction completed successfully!${data.receipt?.whatsappUrl ? `\n\n[Share receipt on WhatsApp](${data.receipt.whatsappUrl})` : ""}`,
+          content: outcome,
         },
       ])
       setPendingAction(null)
@@ -255,6 +285,10 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
 
   const handleSend = () => {
     if (inputText.trim()) sendMessage(inputText)
+  }
+
+  const handleSelectSuggestion = (suggestion: { id: string; label: string; description?: string; data?: any }) => {
+    sendMessage(suggestion.label)
   }
 
   return (
@@ -296,72 +330,127 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-        {messages.map((message) => {
-          const isAssistant = message.role === "assistant"
+        <AnimatePresence>
+          {messages.map((message) => {
+            const isAssistant = message.role === "assistant"
 
-          return (
-            <div key={message.id} className={`flex ${isAssistant ? "justify-start" : "justify-end"}`}>
-              <div className="max-w-[85%]">
-                {isAssistant && (
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="w-6 h-6 rounded-full bg-[#00FF41]/20 flex items-center justify-center">
-                      <Sparkles className="text-[#00FF41]" size={12} />
-                    </div>
-                    <span className="text-[#00FF41] text-xs font-medium">Kumba</span>
-                  </div>
-                )}
-                <div
-                  className={`rounded-2xl px-4 py-3 ${
-                    isAssistant
-                      ? "bg-white/5 border border-white/10 text-white rounded-bl-md"
-                      : "bg-[#00FF41] text-black rounded-br-md"
-                  }`}
-                >
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
-                </div>
-
-                {/* Receipt card */}
-                {isAssistant && message.receipt && (
-                  <div className="mt-2 bg-[#00FF41]/10 border border-[#00FF41]/30 rounded-xl p-3">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[#00FF41] text-xs font-medium">Transaction Complete</span>
-                      <span className="text-white text-xs font-bold">₦{message.receipt.amount.toLocaleString()}</span>
-                    </div>
-                    <p className="text-white/50 text-xs mb-2">Ref: {message.receipt.ref}</p>
-                    <a
-                      href={message.receipt.whatsappUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1 text-xs text-[#00FF41] hover:underline"
+            return (
+              <motion.div
+                key={message.id}
+                initial={{ opacity: 0, y: 20, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: 0.3, ease: [0.25, 0.46, 0.45, 0.94] }}
+                className={`flex ${isAssistant ? "justify-start" : "justify-end"}`}
+              >
+                <div className="max-w-[85%]">
+                  {isAssistant && (
+                    <motion.div
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="flex items-center gap-2 mb-1 ml-1"
                     >
-                      <Share2 size={12} /> Share receipt on WhatsApp
-                    </a>
-                  </div>
-                )}
-
-                {/* Action buttons */}
-                {isAssistant && message.action && (
-                  <button
-                    onClick={() => onNavigate(message.action!.type, message.action!.data)}
-                    className="mt-2 w-full bg-[#00FF41] text-black rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-2 hover:bg-[#00FF41]/90 transition-colors"
+                      <div className="w-6 h-6 rounded-full bg-[#00FF41]/20 flex items-center justify-center">
+                        <Sparkles className="text-[#00FF41]" size={12} />
+                      </div>
+                      <span className="text-[#00FF41] text-xs font-medium">Kumba</span>
+                    </motion.div>
+                  )}
+                  <motion.div
+                    initial={{ scale: 0.95 }}
+                    animate={{ scale: 1 }}
+                    className={`rounded-2xl px-4 py-3 ${
+                      isAssistant
+                        ? "bg-white/5 border border-white/10 text-white rounded-bl-md"
+                        : "bg-[#00FF41] text-black rounded-br-md"
+                    }`}
                   >
-                    <Check size={16} /> Continue
-                  </button>
-                )}
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                  </motion.div>
 
-                {isAssistant && message.content && (
-                  <button
-                    onClick={() => speakText(message.content)}
-                    className="mt-2 flex items-center gap-1 text-white/40 text-xs hover:text-white/60"
-                  >
-                    <Volume2 size={12} />
-                    {isSpeaking ? "Speaking..." : "Listen"}
-                  </button>
-                )}
-              </div>
-            </div>
-          )
-        })}
+                  {/* Suggestion Cards */}
+                  {isAssistant && message.suggestions && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mt-2 space-y-1.5"
+                    >
+                      {message.suggestions.items.map((item) => (
+                        <motion.button
+                          key={item.id}
+                          whileHover={{ scale: 1.01, x: 4 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => handleSelectSuggestion(item)}
+                          className="w-full flex items-center gap-3 bg-[#00FF41]/5 border border-[#00FF41]/20 hover:bg-[#00FF41]/10 hover:border-[#00FF41]/40 rounded-xl px-3.5 py-3 transition-all text-left"
+                        >
+                          <div className="w-8 h-8 rounded-lg bg-[#00FF41]/10 flex items-center justify-center flex-shrink-0">
+                            {message.suggestions!.type === "beneficiary" ? (
+                              <User className="text-[#00FF41]" size={16} />
+                            ) : (
+                              <Sparkles className="text-[#00FF41]" size={16} />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-white text-sm font-semibold truncate">{item.label}</p>
+                            {item.description && (
+                              <p className="text-white/50 text-xs truncate">{item.description}</p>
+                            )}
+                          </div>
+                          <ChevronRight className="text-white/30 flex-shrink-0" size={16} />
+                        </motion.button>
+                      ))}
+                    </motion.div>
+                  )}
+
+                  {/* Receipt card */}
+                  {isAssistant && message.receipt && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="mt-2 bg-[#00FF41]/10 border border-[#00FF41]/30 rounded-xl p-3"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[#00FF41] text-xs font-medium">Transaction Complete</span>
+                        <span className="text-white text-xs font-bold">₦{message.receipt.amount.toLocaleString()}</span>
+                      </div>
+                      <p className="text-white/50 text-xs mb-2">Ref: {message.receipt.ref}</p>
+                      <a
+                        href={message.receipt.whatsappUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-xs text-[#00FF41] hover:underline"
+                      >
+                        <Share2 size={12} /> Share receipt on WhatsApp
+                      </a>
+                    </motion.div>
+                  )}
+
+                  {/* Action buttons */}
+                  {isAssistant && message.action && (
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => onNavigate(message.action!.type, message.action!.data)}
+                      className="mt-2 w-full bg-[#00FF41] text-black rounded-xl py-2.5 text-sm font-bold flex items-center justify-center gap-2 hover:bg-[#00FF41]/90 transition-colors"
+                    >
+                      <Check size={16} /> Continue
+                    </motion.button>
+                  )}
+
+                  {isAssistant && message.content && (
+                    <motion.button
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => speakText(message.content)}
+                      className="mt-2 flex items-center gap-1 text-white/40 text-xs hover:text-white/60"
+                    >
+                      <Volume2 size={12} />
+                      {isSpeaking ? "Speaking..." : "Listen"}
+                    </motion.button>
+                  )}
+                </div>
+              </motion.div>
+            )
+          })}
+        </AnimatePresence>
 
         {isLoading && (
           <div className="flex justify-start">
@@ -380,32 +469,39 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
 
       {/* PIN Confirmation */}
       {showPinInput && pendingAction && (
-        <div className="px-4 pb-3">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="px-4 pb-3"
+        >
           <div className="bg-gradient-to-br from-[#00FF41]/10 to-transparent border border-[#00FF41]/30 rounded-2xl p-4">
             <p className="text-white text-xs mb-3 text-center">Enter your 4-digit PIN to confirm</p>
             <div className="flex justify-center gap-3 mb-3">
               {[0, 1, 2, 3].map((i) => (
-                <div
+                <motion.div
                   key={i}
-                  className={`w-12 h-12 rounded-xl border-2 flex items-center justify-center transition-all ${
-                    pinDots[i] ? "bg-[#00FF41] border-[#00FF41]" : i === pinDots.length ? "border-[#00FF41]/50" : "border-white/20"
-                  }`}
+                  animate={{
+                    scale: pinDots[i] ? [1, 1.15, 1] : 1,
+                    backgroundColor: pinDots[i] ? '#00FF41' : i === pinDots.length ? 'transparent' : 'transparent',
+                    borderColor: pinDots[i] ? '#00FF41' : i === pinDots.length ? '#00FF41' : 'rgba(255,255,255,0.2)',
+                  }}
+                  className="w-12 h-12 rounded-xl border-2 flex items-center justify-center"
                 >
-                  {pinDots[i] && <div className="w-2.5 h-2.5 rounded-full bg-black" />}
-                </div>
+                  {pinDots[i] && <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="w-2.5 h-2.5 rounded-full bg-black" />}
+                </motion.div>
               ))}
             </div>
             {pinError && (
-              <div className="flex items-center justify-center gap-1 mb-2">
+              <motion.div initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} className="flex items-center justify-center gap-1 mb-2">
                 <AlertCircle size={12} className="text-red-400" />
                 <span className="text-red-400 text-xs">{pinError}</span>
-              </div>
+              </motion.div>
             )}
             {isExecuting && (
-              <div className="flex items-center justify-center gap-2 mb-2">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center justify-center gap-2 mb-2">
                 <Loader2 size={14} className="text-[#00FF41] animate-spin" />
                 <span className="text-white/60 text-xs">Processing...</span>
-              </div>
+              </motion.div>
             )}
             <div className="grid grid-cols-3 gap-2 max-w-[200px] mx-auto">
               {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
@@ -426,7 +522,7 @@ export default function KumbaChatScreen({ onBack, onNavigate, userId }: KumbaCha
             <button onClick={() => { setShowPinInput(false); setPendingAction(null); setPinDots([]) }}
               className="w-full mt-2 text-center text-white/40 text-xs hover:text-white/60">Cancel</button>
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* Quick suggestions */}

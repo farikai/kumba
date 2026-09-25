@@ -1,6 +1,11 @@
 "use client"
 
 import { useState } from "react"
+import { useQuery } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
+import { motion, AnimatePresence } from "framer-motion"
 import {
   ArrowLeft,
   TrendingUp,
@@ -18,6 +23,7 @@ import {
 
 interface BudgetAnalyticsScreenProps {
   onBack: () => void
+  userId?: string | null
 }
 
 // Simulated user transaction data that Kumba AI learns from
@@ -80,17 +86,91 @@ const userFinancialData = {
   ],
 }
 
-export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenProps) {
+export default function BudgetAnalyticsScreen({ onBack, userId }: BudgetAnalyticsScreenProps) {
   const [selectedPeriod, setSelectedPeriod] = useState<"week" | "month" | "year">("month")
   const [activeSection, setActiveSection] = useState<"overview" | "scheduled" | "shopping">("overview")
+  const { session } = useSession()
+  const effectiveUserId = (session?.userId ?? userId) as Id<"users"> | undefined
+  const authed = effectiveUserId && session?.sessionToken
+    ? { userId: effectiveUserId, sessionToken: session.sessionToken }
+    : "skip"
+  const liveAnalytics = useQuery(api.budgets.getBudgetAnalytics, authed)
+  const liveHealth = useQuery(api.analytics.getFinancialHealth, authed)
+  const liveScheduled = useQuery(api.scheduled.list, authed)
+  const liveOrders = useQuery(api.orders.list, authed)
+  // Live data only — the old build rendered hardcoded sample figures here.
+  const income = liveHealth?.income ?? 0
+  const spent = liveAnalytics?.totalSpent ?? liveHealth?.expenses ?? 0
 
-  const budgetUsedPercent = (userFinancialData.totalSpent / userFinancialData.monthlyIncome) * 100
-  const savingsRate = (userFinancialData.totalSaved / userFinancialData.monthlyIncome) * 100
+  const budgetUsedPercent = (spent / Math.max(income, 1)) * 100
+  const savingsRate = liveHealth ? liveHealth.savingsRate : 0
+
+  // Rule-based insights from real numbers (not canned strings).
+  const liveInsights: { type: "warning" | "success" | "tip"; title: string; message: string; action: string }[] = []
+  for (const row of liveAnalytics?.analytics ?? []) {
+    if (row.percentUsed >= 90) {
+      liveInsights.push({
+        type: "warning",
+        title: `${row.category} budget nearly depleted`,
+        message: `You've spent ${row.percentUsed}% (₦${row.spent.toLocaleString()} of ₦${row.budget.toLocaleString()}). Consider holding off on non-essential purchases.`,
+        action: "View Details",
+      })
+    }
+  }
+  if (liveHealth && liveHealth.savingsRate >= 10) {
+    liveInsights.push({
+      type: "success",
+      title: "Healthy savings rate",
+      message: `You're saving ${liveHealth.savingsRate}% of income with ${liveHealth.emergencyFundMonths} months of expenses covered.`,
+      action: "See Progress",
+    })
+  } else if (liveHealth) {
+    liveInsights.push({
+      type: "tip",
+      title: "Savings opportunity",
+      message: `Your savings rate is ${liveHealth.savingsRate}%. Try the 50/30/20 rule — 20% of income to savings.`,
+      action: "Set Limit",
+    })
+  }
+  if (liveInsights.length === 0) {
+    liveInsights.push({
+      type: "tip",
+      title: "No data yet",
+      message: "Set a budget and transact to unlock spending insights.",
+      action: "Set Limit",
+    })
+  }
+
+  const palette = ["#00FF41", "#4169E1", "#FF6B6B", "#FFB800", "#9333EA", "#FF9500", "#00BFFF", "#FF69B4"]
+  const liveCategories = (liveAnalytics?.analytics ?? []).map((row, i) => ({
+    name: row.category,
+    spent: row.spent,
+    allocated: row.budget,
+    color: palette[i % palette.length],
+  }))
+  const scheduledRows = (liveScheduled ?? []).map((p) => ({
+    name: p.recipientName,
+    date: new Date(p.nextPaymentDate).toLocaleDateString("en-NG"),
+    amount: p.amount,
+    status: p.isActive ? "active" : "paused",
+  }))
+  const orderRows = (liveOrders ?? []).map((o) => ({
+    item: o.productName,
+    store: o.store,
+    amount: o.productPrice,
+    date: new Date(o.createdAt).toLocaleDateString("en-NG"),
+  }))
+  const shoppingSpend = orderRows.reduce((s, o) => s + o.amount, 0)
+  const avgDaily = liveHealth ? Math.round(liveHealth.expenses / 30) : 0
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#0a1a12] via-[#0d1f16] to-[#0a1a12] pb-24">
       {/* Header */}
-      <div className="px-5 pt-4 pb-3 flex items-center gap-4">
+      <motion.div
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="px-5 pt-4 pb-3 flex items-center gap-4"
+      >
         <button
           onClick={onBack}
           className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
@@ -104,10 +184,15 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
         <button className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center">
           <MoreHorizontal className="text-white/60" size={20} />
         </button>
-      </div>
+      </motion.div>
 
       {/* Period Selector */}
-      <div className="px-5 mb-4">
+      <motion.div
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.05 }}
+        className="px-5 mb-4"
+      >
         <div className="flex gap-2 bg-white/5 rounded-2xl p-1">
           {(["week", "month", "year"] as const).map((period) => (
             <button
@@ -121,52 +206,39 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
             </button>
           ))}
         </div>
-      </div>
+      </motion.div>
 
       {/* Main Stats Cards */}
-      <div className="px-5 mb-5">
+      <motion.div
+        initial="hidden"
+        animate="visible"
+        variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.08 } } }}
+        className="px-5 mb-5"
+      >
         <div className="grid grid-cols-2 gap-3">
-          {/* Income */}
-          <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <ArrowDownRight className="text-[#00FF41]" size={16} />
-              <span className="text-white/50 text-xs">Income</span>
-            </div>
-            <p className="text-white font-bold text-xl">₦{(userFinancialData.monthlyIncome / 1000).toFixed(0)}k</p>
-            <p className="text-[#00FF41] text-[10px] font-medium mt-1">+12% vs last month</p>
-          </div>
-
-          {/* Spent */}
-          <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <ArrowUpRight className="text-red-400" size={16} />
-              <span className="text-white/50 text-xs">Spent</span>
-            </div>
-            <p className="text-white font-bold text-xl">₦{(userFinancialData.totalSpent / 1000).toFixed(0)}k</p>
-            <p className="text-red-400 text-[10px] font-medium mt-1">{budgetUsedPercent.toFixed(0)}% of income</p>
-          </div>
-
-          {/* Saved */}
-          <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <PiggyBank className="text-[#00FF41]" size={16} />
-              <span className="text-white/50 text-xs">Saved</span>
-            </div>
-            <p className="text-white font-bold text-xl">₦{(userFinancialData.totalSaved / 1000).toFixed(0)}k</p>
-            <p className="text-[#00FF41] text-[10px] font-medium mt-1">{savingsRate.toFixed(0)}% savings rate</p>
-          </div>
-
-          {/* Scheduled */}
-          <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <CalendarClock className="text-yellow-400" size={16} />
-              <span className="text-white/50 text-xs">Scheduled</span>
-            </div>
-            <p className="text-white font-bold text-xl">₦{(userFinancialData.scheduledPayments / 1000).toFixed(0)}k</p>
-            <p className="text-yellow-400 text-[10px] font-medium mt-1">5 upcoming</p>
-          </div>
+          {[
+            { icon: ArrowDownRight, label: "Income", value: `₦${(userFinancialData.monthlyIncome / 1000).toFixed(0)}k`, change: "+12% vs last month", color: "#00FF41" },
+            { icon: ArrowUpRight, label: "Spent", value: `₦${(userFinancialData.totalSpent / 1000).toFixed(0)}k`, change: `${budgetUsedPercent.toFixed(0)}% of income`, color: "text-red-400" },
+            { icon: PiggyBank, label: "Saved", value: `₦${(userFinancialData.totalSaved / 1000).toFixed(0)}k`, change: `${savingsRate.toFixed(0)}% savings rate`, color: "#00FF41" },
+            { icon: CalendarClock, label: "Scheduled", value: `₦${(userFinancialData.scheduledPayments / 1000).toFixed(0)}k`, change: "5 upcoming", color: "text-yellow-400" },
+          ].map((stat, i) => (
+            <motion.div
+              key={i}
+              variants={{ hidden: { opacity: 0, scale: 0.9 }, visible: { opacity: 1, scale: 1 } }}
+              className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-2xl p-4"
+            >
+              <div className="flex items-center gap-2 mb-2">
+                <stat.icon size={16} className={typeof stat.color === 'string' && stat.color.startsWith('text-') ? stat.color : `text-[${stat.color}]`} style={typeof stat.color === 'string' && stat.color.startsWith('#') ? { color: stat.color } : {}} />
+                <span className="text-white/50 text-xs">{stat.label}</span>
+              </div>
+              <p className="text-white font-bold text-xl">{stat.value}</p>
+              <p className={`text-[10px] font-medium mt-1 ${typeof stat.color === 'string' && stat.color.startsWith('text-') ? stat.color : `text-[${stat.color}]`}`} style={typeof stat.color === 'string' && stat.color.startsWith('#') ? { color: stat.color } : {}}>
+                {stat.change}
+              </p>
+            </motion.div>
+          ))}
         </div>
-      </div>
+      </motion.div>
 
       {/* Section Tabs */}
       <div className="px-5 mb-4">
@@ -193,23 +265,33 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
       </div>
 
       {/* AI Insights */}
-      <div className="px-5 mb-5">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.2 }}
+        className="px-5 mb-5"
+      >
         <div className="flex items-center gap-2 mb-3">
           <Bot className="text-[#00FF41]" size={16} />
           <h2 className="text-white font-bold text-sm">Kumba AI Insights</h2>
         </div>
         <div className="space-y-2">
-          {userFinancialData.aiInsights.map((insight, index) => (
-            <div
-              key={index}
-              className={`p-4 rounded-2xl border ${
-                insight.type === "warning"
-                  ? "bg-orange-500/10 border-orange-500/20"
-                  : insight.type === "success"
-                    ? "bg-[#00FF41]/10 border-[#00FF41]/20"
-                    : "bg-blue-500/10 border-blue-500/20"
-              }`}
-            >
+          <AnimatePresence>
+            {liveInsights.map((insight, index) => (
+              <motion.div
+                key={index}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: index * 0.15 }}
+                whileHover={{ scale: 1.01, x: 4 }}
+                className={`p-4 rounded-2xl border ${
+                  insight.type === "warning"
+                    ? "bg-orange-500/10 border-orange-500/20"
+                    : insight.type === "success"
+                      ? "bg-[#00FF41]/10 border-[#00FF41]/20"
+                      : "bg-blue-500/10 border-blue-500/20"
+                }`}
+              >
               <div className="flex items-start gap-3">
                 <div
                   className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
@@ -246,36 +328,47 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
                     {insight.action} →
                   </button>
                 </div>
-              </div>
-            </div>
-          ))}
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </div>
-      </div>
+      </motion.div>
 
       {/* Category Breakdown */}
       {activeSection === "overview" && (
-        <div className="px-5 mb-5">
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="px-5 mb-5"
+        >
           <h2 className="text-white font-bold text-sm mb-3">Budget by Category</h2>
           <div className="space-y-3">
-            {userFinancialData.categories.map((category, index) => {
-              const percentUsed = (category.spent / category.allocated) * 100
+            {liveCategories.length === 0 && (
+              <p className="text-white/40 text-sm text-center py-6">
+                No budgets set yet. Create one from the Budget Planner.
+              </p>
+            )}
+            {liveCategories.map((category, index) => {
+              const percentUsed = category.allocated > 0 ? (category.spent / category.allocated) * 100 : 0
               const isOverBudget = percentUsed > 90
 
               return (
-                <div key={index} className="bg-white/[0.03] border border-white/5 rounded-2xl p-4">
+                <motion.div
+                  key={index}
+                  initial={{ opacity: 0, x: -15 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: index * 0.08 }}
+                  whileHover={{ scale: 1.01 }}
+                  className="bg-white/[0.03] border border-white/5 rounded-2xl p-4"
+                >
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-3">
                       <div
                         className="w-10 h-10 rounded-xl flex items-center justify-center"
                         style={{ backgroundColor: `${category.color}20` }}
                       >
-                        {category.icon === "home" && <Wallet size={18} style={{ color: category.color }} />}
-                        {category.icon === "shopping" && <ShoppingBag size={18} style={{ color: category.color }} />}
-                        {category.icon === "car" && <TrendingUp size={18} style={{ color: category.color }} />}
-                        {category.icon === "entertainment" && (
-                          <TrendingDown size={18} style={{ color: category.color }} />
-                        )}
-                        {category.icon === "savings" && <PiggyBank size={18} style={{ color: category.color }} />}
+                        <Wallet size={18} style={{ color: category.color }} />
                       </div>
                       <div>
                         <p className="text-white font-semibold text-sm">{category.name}</p>
@@ -297,11 +390,11 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
                       }}
                     />
                   </div>
-                </div>
+                </motion.div>
               )
             })}
           </div>
-        </div>
+        </motion.div>
       )}
 
       {/* Scheduled Payments Section */}
@@ -309,7 +402,10 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
         <div className="px-5 mb-5">
           <h2 className="text-white font-bold text-sm mb-3">Scheduled Payments</h2>
           <div className="space-y-2">
-            {userFinancialData.scheduledBreakdown.map((payment, index) => (
+            {scheduledRows.length === 0 && (
+              <p className="text-white/40 text-sm text-center py-6">No scheduled payments.</p>
+            )}
+            {scheduledRows.map((payment, index) => (
               <div
                 key={index}
                 className="bg-white/[0.03] border border-white/5 rounded-2xl p-4 flex items-center justify-between"
@@ -365,21 +461,17 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
         <div className="px-5 mb-5">
           <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-2xl p-4 mb-4">
             <div className="flex items-center justify-between mb-3">
-              <span className="text-white/50 text-sm">Total Shopping Spend</span>
-              <span className="text-white font-bold text-xl">₦{userFinancialData.shoppingSpend.toLocaleString()}</span>
+              <span className="text-white/50 text-sm">Total Order Spend</span>
+              <span className="text-white font-bold text-xl">₦{shoppingSpend.toLocaleString()}</span>
             </div>
-            <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-gradient-to-r from-[#FF6B6B] to-[#FF8E8E] rounded-full"
-                style={{ width: "98%" }}
-              />
-            </div>
-            <p className="text-red-400 text-xs mt-2">98% of shopping budget used</p>
           </div>
 
-          <h3 className="text-white font-bold text-sm mb-3">Recent Purchases</h3>
+          <h3 className="text-white font-bold text-sm mb-3">Orders</h3>
           <div className="space-y-2">
-            {userFinancialData.recentPurchases.map((purchase, index) => (
+            {orderRows.length === 0 && (
+              <p className="text-white/40 text-sm text-center py-6">No orders placed yet.</p>
+            )}
+            {orderRows.map((purchase, index) => (
               <div
                 key={index}
                 className="bg-white/[0.03] border border-white/5 rounded-2xl p-4 flex items-center justify-between"
@@ -403,34 +495,49 @@ export default function BudgetAnalyticsScreen({ onBack }: BudgetAnalyticsScreenP
       )}
 
       {/* Spending Patterns AI Card */}
-      <div className="px-5">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.3 }}
+        className="px-5"
+      >
         <div className="bg-gradient-to-r from-[#00FF41]/10 via-[#00FF41]/5 to-transparent border border-[#00FF41]/20 rounded-2xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <Bot className="text-[#00FF41]" size={18} />
-            <span className="text-[#00FF41] font-bold text-sm">AI Spending Patterns</span>
+            <span className="text-[#00FF41] font-bold text-sm">AI Prediction: Next Month Outlook</span>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-black/20 rounded-xl p-3">
               <p className="text-white/40 text-xs">Avg. Daily Spend</p>
-              <p className="text-white font-bold">
-                ₦{userFinancialData.spendingPatterns.averageDaily.toLocaleString()}
-              </p>
+              <p className="text-white font-bold">₦{avgDaily.toLocaleString()}</p>
             </div>
             <div className="bg-black/20 rounded-xl p-3">
-              <p className="text-white/40 text-xs">Highest Spend Day</p>
-              <p className="text-white font-bold">{userFinancialData.spendingPatterns.highestDay}</p>
+              <p className="text-white/40 text-xs">Savings Rate</p>
+              <p className="text-white font-bold">{savingsRate.toFixed(1)}%</p>
             </div>
             <div className="bg-black/20 rounded-xl p-3">
-              <p className="text-white/40 text-xs">Lowest Spend Day</p>
-              <p className="text-white font-bold">{userFinancialData.spendingPatterns.lowestDay}</p>
+              <p className="text-white/40 text-xs">Budget Used</p>
+              <p className="text-white font-bold">{budgetUsedPercent.toFixed(0)}%</p>
             </div>
             <div className="bg-black/20 rounded-xl p-3">
-              <p className="text-white/40 text-xs">Impulse Rate</p>
-              <p className="text-white font-bold">{userFinancialData.spendingPatterns.impulseSpending}%</p>
+              <p className="text-white/40 text-xs">Net This Month</p>
+              <p className="text-white font-bold">₦{(income - spent).toLocaleString()}</p>
             </div>
           </div>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.6 }}
+            className="mt-3 bg-black/20 rounded-xl p-3 flex items-center gap-3"
+          >
+            <Lightbulb className="text-yellow-400 flex-shrink-0" size={16} />
+            <p className="text-white/70 text-xs leading-relaxed">
+              Projection: at ₦{avgDaily.toLocaleString()}/day you&apos;re on pace to spend ₦
+              {(avgDaily * 30).toLocaleString()} this month against ₦{income.toLocaleString()} income.
+            </p>
+          </motion.div>
         </div>
-      </div>
+      </motion.div>
     </div>
   )
 }

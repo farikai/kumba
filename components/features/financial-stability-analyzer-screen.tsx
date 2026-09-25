@@ -1,8 +1,10 @@
 "use client"
+import { motion } from "framer-motion"
 import { ArrowLeft, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Zap, Target } from "lucide-react"
 import { useQuery } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 
 interface FinancialStabilityAnalyzerScreenProps {
   onBack: () => void
@@ -10,13 +12,21 @@ interface FinancialStabilityAnalyzerScreenProps {
 }
 
 export default function FinancialStabilityAnalyzerScreen({ onBack, userId }: FinancialStabilityAnalyzerScreenProps) {
-  const health = useQuery(api.analytics.getFinancialHealth, { userId })
+  const { session } = useSession()
+  const health = useQuery(
+    api.analytics.getFinancialHealth,
+    session ? { userId, sessionToken: session.sessionToken } : "skip"
+  )
 
   if (!health) {
     return (
-      <div className="min-h-screen bg-gradient-to-b from-card to-background text-foreground flex items-center justify-center">
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="min-h-screen bg-gradient-to-b from-card to-background text-foreground flex items-center justify-center"
+      >
         <p className="text-muted-foreground text-sm">Loading financial analysis...</p>
-      </div>
+      </motion.div>
     )
   }
 
@@ -77,7 +87,11 @@ export default function FinancialStabilityAnalyzerScreen({ onBack, userId }: Fin
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-card to-background text-foreground pb-32">
-      <div className="sticky top-0 z-40 bg-card/80 backdrop-blur-xl border-b border-border/40 px-5 py-4">
+      <motion.div
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="sticky top-0 z-40 bg-card/80 backdrop-blur-xl border-b border-border/40 px-5 py-4"
+      >
         <div className="flex items-center gap-4">
           <button onClick={onBack} className="p-2 hover:bg-card rounded-lg transition">
             <ArrowLeft size={20} />
@@ -87,23 +101,39 @@ export default function FinancialStabilityAnalyzerScreen({ onBack, userId }: Fin
             <p className="text-xs text-muted-foreground">AI-powered analysis from your data</p>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       <div className="px-5 py-6 space-y-6">
-        <div className="border rounded-2xl p-6 space-y-4" style={{ background: status.bg, borderColor: status.color }}>
+        <motion.div
+          initial={{ opacity: 0, y: 15 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          whileHover={{ scale: 1.02 }}
+          className="border rounded-2xl p-6 space-y-4" style={{ background: status.bg, borderColor: status.color }}
+        >
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-muted-foreground mb-1">Financial Health Score</p>
               <p className="text-4xl font-bold" style={{ color: status.color }}>{health.score}/100</p>
             </div>
-            <div className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: status.color + "20", borderWidth: "3px", borderColor: status.color }}>
+            <motion.div
+              initial={{ scale: 0 }}
+              animate={{ scale: 1 }}
+              transition={{ delay: 0.3, type: "spring", stiffness: 200 }}
+              className="w-20 h-20 rounded-full flex items-center justify-center" style={{ background: status.color + "20", borderWidth: "3px", borderColor: status.color }}
+            >
               <span className="text-2xl font-bold" style={{ color: status.color }}>{health.score}%</span>
-            </div>
+            </motion.div>
           </div>
           <p className="text-sm font-semibold" style={{ color: status.color }}>{status.label} Financial Position</p>
-        </div>
+        </motion.div>
 
-        <div className="grid grid-cols-2 gap-3">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          className="grid grid-cols-2 gap-3"
+        >
           {[
             { label: "Savings Rate", value: `${health.savingsRate}%`, icon: Target },
             { label: "Emergency Fund", value: `${health.emergencyFundMonths}mo`, icon: AlertCircle },
@@ -113,23 +143,42 @@ export default function FinancialStabilityAnalyzerScreen({ onBack, userId }: Fin
             const Icon = metric.icon
             const isPositive = i === 3 ? health.spendingGrowth <= 0 : true
             return (
-              <div key={i} className="bg-card border border-border/50 rounded-xl p-4">
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.2 + i * 0.08 }}
+                whileHover={{ scale: 1.03 }}
+                className="bg-card border border-border/50 rounded-xl p-4"
+              >
                 <div className="flex items-center justify-between mb-2">
                   <p className="text-xs text-muted-foreground">{metric.label}</p>
                   <Icon size={16} className={isPositive ? "text-[#00FF41]" : "text-red-500"} />
                 </div>
                 <p className="font-bold text-lg">{metric.value}</p>
-              </div>
+              </motion.div>
             )
           })}
-        </div>
+        </motion.div>
 
-        <div className="space-y-3">
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.25 }}
+          className="space-y-3"
+        >
           <h3 className="font-bold text-sm">Kumba AI Insights</h3>
           {insights.map((insight, i) => {
             const Icon = insight.icon
             return (
-              <div key={i} className={`p-4 rounded-xl border ${insight.positive ? "border-[#00FF41]/30 bg-[#00FF41]/5" : "border-[#FFB800]/30 bg-[#FFB800]/5"}`}>
+              <motion.div
+                key={i}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.3 + i * 0.1 }}
+                whileHover={{ x: 4 }}
+                className={`p-4 rounded-xl border ${insight.positive ? "border-[#00FF41]/30 bg-[#00FF41]/5" : "border-[#FFB800]/30 bg-[#FFB800]/5"}`}
+              >
                 <div className="flex gap-3">
                   <Icon size={20} className={insight.positive ? "text-[#00FF41]" : "text-[#FFB800]"} />
                   <div className="flex-1">
@@ -137,22 +186,34 @@ export default function FinancialStabilityAnalyzerScreen({ onBack, userId }: Fin
                     <p className="text-xs text-muted-foreground mt-1">{insight.description}</p>
                   </div>
                 </div>
-              </div>
+              </motion.div>
             )
           })}
-        </div>
+        </motion.div>
 
-        <div className="bg-card border border-border/50 rounded-2xl p-5 space-y-4">
+        <motion.div
+          initial={{ opacity: 0, y: 15 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.35 }}
+          className="bg-card border border-border/50 rounded-2xl p-5 space-y-4"
+        >
           <h3 className="font-bold text-sm">Next Steps</h3>
           <div className="space-y-3">
             {recommendations.map((rec, i) => (
-              <button key={i} className="w-full p-3 text-left border border-border/50 rounded-lg hover:border-[#00FF41]/50 transition text-sm">
+              <motion.button
+                key={i}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.4 + i * 0.08 }}
+                whileHover={{ scale: 1.01 }}
+                className="w-full p-3 text-left border border-border/50 rounded-lg hover:border-[#00FF41]/50 transition text-sm"
+              >
                 <p className="font-semibold">{rec.title}</p>
                 <p className="text-xs text-muted-foreground">{rec.description}</p>
-              </button>
+              </motion.button>
             ))}
           </div>
-        </div>
+        </motion.div>
       </div>
     </div>
   )

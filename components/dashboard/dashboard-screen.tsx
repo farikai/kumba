@@ -1,9 +1,12 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import { useQuery } from "convex/react"
 import { api } from "@/convex/_generated/api"
-import { Bell, Eye, EyeOff, ArrowDownToLine, Send, Scan as ScanQr, CalendarClock, ShoppingBag, Plus, PiggyBank, Mic, BarChart3, ChevronLeft, ChevronRight, Flame, Target, Wallet, TrendingUp, MessageCircle, Zap, Smartphone, Wifi, LayoutGrid, Image as ImageIcon } from "lucide-react"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
+import { Bell, Eye, EyeOff, ArrowDownToLine, Send, CalendarClock, ShoppingBag, Plus, PiggyBank, Mic, BarChart3, ChevronLeft, ChevronRight, Target, Wallet, TrendingUp, MessageCircle, Zap, Smartphone, Wifi, LayoutGrid, Image as ImageIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import SendMoneyScreen from "@/components/payments/send-money-screen"
 import QrScannerScreen from "@/components/payments/qr-scanner-screen"
@@ -58,55 +61,7 @@ type ScreenType =
   | "moreFeatures"
   | "seller"
 
-const insightCards = [
-  {
-    id: "scheduled",
-    icon: CalendarClock,
-    title: "Upcoming Payment",
-    value: "NGN 150,000",
-    subtitle: "Rent due in 5 days",
-    color: "#FF6B6B",
-    action: "scheduled",
-  },
-  {
-    id: "budget",
-    icon: Target,
-    title: "Budget Status",
-    value: "62%",
-    subtitle: "NGN 186,000 of NGN 300,000 used",
-    color: "#00FF41",
-    action: "budgetAnalytics",
-  },
-  {
-    id: "streak",
-    icon: Flame,
-    title: "Savings Streak",
-    value: "12 Days",
-    subtitle: "Keep it up! Best: 18 days",
-    color: "#FFB800",
-    action: "budgetAnalytics",
-  },
-  {
-    id: "savings",
-    icon: PiggyBank,
-    title: "Total Savings",
-    value: "NGN 245,000",
-    subtitle: "+NGN 25,000 this month",
-    color: "#00D4FF",
-    action: "budgetAnalytics",
-  },
-  {
-    id: "spending",
-    icon: TrendingUp,
-    title: "Weekly Spending",
-    value: "NGN 45,000",
-    subtitle: "18% below average",
-    color: "#A855F7",
-    action: "transactionAnalytics",
-  },
-]
-
-export default function DashboardScreen({ userId: propUserId }: { userId?: string | null }) {
+export default function DashboardScreen({ userId: propUserId, onLogout }: { userId?: string | null; onLogout?: () => void }) {
   const [balanceVisible, setBalanceVisible] = useState(true)
   const [kumbaDefault, setKumbaDefault] = useState(false)
   const [currentScreen, setCurrentScreen] = useState<ScreenType>("dashboard")
@@ -120,10 +75,63 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
   const [currentInsightIndex, setCurrentInsightIndex] = useState(0)
 
   // Use provided userId or fallback to seeded demo user
-  const userId = propUserId ?? null
+  const { session } = useSession()
+  const userId = (session?.userId ?? propUserId ?? null) as Id<"users"> | null
+  const sessionToken = session?.sessionToken ?? null
+  const authed = userId && sessionToken ? { userId, sessionToken } : "skip"
 
-  const walletBalance = useQuery(api.wallet.getBalance, userId ? { userId: userId as any } : "skip")
-  const recentTransactions = useQuery(api.wallet.getTransactions, userId ? { userId: userId as any, limit: 10 } : "skip")
+  const walletBalance = useQuery(api.wallet.getBalance, authed)
+  const recentTransactions = useQuery(api.wallet.getTransactions, authed === "skip" ? "skip" : { ...authed, limit: 10 })
+  const scheduledPayments = useQuery(api.scheduled.list, authed)
+  const budgetAnalytics = useQuery(api.budgets.getBudgetAnalytics, authed)
+
+  const activeScheduled = (scheduledPayments ?? []).filter((p) => p.isActive)
+  const totalUpcoming = activeScheduled.reduce((sum, p) => sum + p.amount, 0)
+  const nextDue = [...activeScheduled].sort((a, b) => a.nextPaymentDate - b.nextPaymentDate)[0] ?? null
+  const budgetUsedPct = budgetAnalytics && budgetAnalytics.totalBudget > 0
+    ? Math.round((budgetAnalytics.totalSpent / budgetAnalytics.totalBudget) * 100)
+    : null
+
+  const insightCards = [
+    {
+      id: "scheduled",
+      icon: CalendarClock,
+      title: "Upcoming Payment",
+      value: nextDue ? `NGN ${nextDue.amount.toLocaleString()}` : "None scheduled",
+      subtitle: nextDue ? `${nextDue.recipientName} • ${new Date(nextDue.nextPaymentDate).toLocaleDateString("en-NG")}` : "No active scheduled payments",
+      color: "#FF6B6B",
+      action: "scheduled",
+    },
+    {
+      id: "budget",
+      icon: Target,
+      title: "Budget Status",
+      value: budgetUsedPct !== null ? `${budgetUsedPct}%` : "No budget",
+      subtitle: budgetAnalytics
+        ? `NGN ${budgetAnalytics.totalSpent.toLocaleString()} of NGN ${budgetAnalytics.totalBudget.toLocaleString()} used`
+        : "Set a budget to track spending",
+      color: "#00FF41",
+      action: "budgetAnalytics",
+    },
+    {
+      id: "upcoming-total",
+      icon: PiggyBank,
+      title: "Scheduled Total",
+      value: `NGN ${totalUpcoming.toLocaleString()}`,
+      subtitle: `${activeScheduled.length} active payment${activeScheduled.length === 1 ? "" : "s"}`,
+      color: "#00D4FF",
+      action: "scheduled",
+    },
+    {
+      id: "spending",
+      icon: TrendingUp,
+      title: "Recent Activity",
+      value: `${(recentTransactions ?? []).length} txns`,
+      subtitle: "Latest wallet movements below",
+      color: "#A855F7",
+      action: "history",
+    },
+  ]
 
   useEffect(() => {
     if (kumbaDefault && currentScreen === "dashboard") {
@@ -190,7 +198,7 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
   }
 
   if (currentScreen === "send") {
-    return <SendMoneyScreen onBack={() => setCurrentScreen("dashboard")} onScanQR={() => setCurrentScreen("scan")} userId={userId} />
+    return <SendMoneyScreen onBack={() => setCurrentScreen("dashboard")} onScanQR={() => setCurrentScreen("scan")} userId={userId as any} />
   }
 
   if (currentScreen === "scan") {
@@ -198,7 +206,7 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
   }
 
   if (currentScreen === "budget") {
-    return <AiBudgetPlannerScreen onBack={() => setCurrentScreen("dashboard")} userId={userId} />
+    return <AiBudgetPlannerScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "shop") {
@@ -206,19 +214,19 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
   }
 
   if (currentScreen === "beneficiaries") {
-    return <BeneficiariesScreen onBack={() => setCurrentScreen("dashboard")} />
+    return <BeneficiariesScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "fund") {
-    return <FundWalletScreen onBack={() => setCurrentScreen("dashboard")} />
+    return <FundWalletScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "scheduled") {
-    return <ScheduledPaymentsScreen onBack={() => setCurrentScreen("dashboard")} userId={userId} />
+    return <ScheduledPaymentsScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "settings") {
-    return <SettingsScreen onBack={() => setCurrentScreen("dashboard")} onKumbaDefaultChange={setKumbaDefault} kumbaDefault={kumbaDefault} />
+    return <SettingsScreen onBack={() => setCurrentScreen("dashboard")} onLogout={onLogout} onKumbaDefaultChange={setKumbaDefault} kumbaDefault={kumbaDefault} />
   }
 
   if (currentScreen === "orderConfirm" && selectedProduct) {
@@ -232,15 +240,15 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
   }
 
   if (currentScreen === "history") {
-    return <TransactionHistoryScreen onBack={() => setCurrentScreen("dashboard")} />
+    return <TransactionHistoryScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "budgetAnalytics") {
-    return <BudgetAnalyticsScreen onBack={() => setCurrentScreen("dashboard")} />
+    return <BudgetAnalyticsScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "transactionAnalytics") {
-    return <TransactionAnalyticsScreen onBack={() => setCurrentScreen("dashboard")} />
+    return <TransactionAnalyticsScreen onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "kumbaChat") {
@@ -294,11 +302,11 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
   }
 
   if (currentScreen === "financialAnalyzer") {
-    return <FinancialStabilityAnalyzerScreen onBack={() => setCurrentScreen("moreFeatures")} userId={userId} />
+    return <FinancialStabilityAnalyzerScreen onBack={() => setCurrentScreen("moreFeatures")} userId={userId as any} />
   }
 
   if (currentScreen === "seller") {
-    return <SellerDashboard onBack={() => setCurrentScreen("dashboard")} userId={userId} />
+    return <SellerDashboard onBack={() => setCurrentScreen("dashboard")} userId={userId as any} />
   }
 
   if (currentScreen === "budgetCreator") {
@@ -334,72 +342,125 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
         userId={userId}
       />
 
-      {/* Header */}
-      <div className="px-5 pt-4 pb-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-11 h-11 rounded-full overflow-hidden border-2 border-[#00FF41]/20 bg-gradient-to-br from-[#00FF41]/20 to-[#00FF41]/5 flex items-center justify-center">
-            <span className="text-[#00FF41] font-bold text-sm">AD</span>
-          </div>
-          <div>
-            <p className="text-white/50 text-[11px] font-medium">Good evening</p>
-            <p className="text-white font-semibold text-sm">Ada</p>
-          </div>
-        </div>
-        <button className="w-9 h-9 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors relative">
-          <Bell className="text-white" size={18} />
-          <div className="absolute top-1.5 right-1.5 w-2 h-2 bg-[#00FF41] rounded-full" />
-        </button>
+      {/* Background ambient glow */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-[#00FF41]/3 blur-[120px] rounded-full" />
       </div>
 
+      {/* Header */}
+      <motion.div
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+        className="px-5 pt-4 pb-3 flex items-center justify-between relative z-10"
+      >
+        <div className="flex items-center gap-3">
+          <motion.div
+            whileTap={{ scale: 0.95 }}
+            className="w-11 h-11 rounded-full overflow-hidden border-2 border-[#00FF41]/20 bg-gradient-to-br from-[#00FF41]/20 to-[#00FF41]/5 flex items-center justify-center"
+          >
+            <span className="text-[#00FF41] font-bold text-sm">AD</span>
+          </motion.div>
+          <div>
+            <p className="text-white/50 text-[11px] font-medium">
+              {new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 17 ? "Good afternoon" : "Good evening"}
+            </p>
+            <p className="text-white font-semibold text-sm">{session?.name ?? "Welcome"}</p>
+          </div>
+        </div>
+        <motion.button
+          whileTap={{ scale: 0.9 }}
+          className="w-9 h-9 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors relative"
+        >
+          <Bell className="text-white" size={18} />
+          <motion.div
+            animate={{ scale: [1, 1.3, 1] }}
+            transition={{ duration: 2, repeat: Infinity }}
+            className="absolute top-1.5 right-1.5 w-2 h-2 bg-[#00FF41] rounded-full"
+          />
+        </motion.button>
+      </motion.div>
+
       {/* Balance Card */}
-      <div className="px-5 mb-5">
-        <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-[20px] p-5 shadow-xl">
-          <div className="flex items-center justify-between mb-1">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.1 }}
+        className="px-5 mb-5 relative z-10"
+      >
+        <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/5 rounded-[20px] p-5 shadow-xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-32 h-32 bg-[#00FF41]/5 blur-[60px] rounded-full" />
+          <div className="flex items-center justify-between mb-1 relative">
             <span className="text-white/50 text-xs font-medium">Total Balance</span>
-            <button
+            <motion.button
+              whileTap={{ scale: 0.9 }}
               onClick={() => setBalanceVisible(!balanceVisible)}
               className="text-white/50 hover:text-white/80 transition-colors"
             >
               {balanceVisible ? <Eye size={16} /> : <EyeOff size={16} />}
-            </button>
+            </motion.button>
           </div>
-          <h1 className="text-white text-[32px] font-bold mb-5 tracking-tight">
-            {balanceVisible ? `NGN ${(walletBalance ?? 842300.5).toLocaleString()}` : "NGN ••••••"}
-          </h1>
-          <Button
-            onClick={() => setCurrentScreen("fund")}
-            className="w-full h-11 bg-[#00FF41] hover:bg-[#00FF41]/90 active:bg-[#00FF41]/80 text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-[#00FF41]/15 transition-all"
+          <motion.h1
+            key={balanceVisible ? 'visible' : 'hidden'}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-white text-[32px] font-bold mb-5 tracking-tight relative"
           >
-            <Plus size={16} />
-            Fund Wallet
-          </Button>
+            {balanceVisible ? `NGN ${(walletBalance ?? 0).toLocaleString()}` : "NGN ••••••"}
+          </motion.h1>
+          <motion.div whileTap={{ scale: 0.98 }} className="relative">
+            <Button
+              onClick={() => setCurrentScreen("fund")}
+              className="w-full h-11 bg-[#00FF41] hover:bg-[#00FF41]/90 active:bg-[#00FF41]/80 text-black font-bold text-sm rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-[#00FF41]/15 transition-all"
+            >
+              <Plus size={16} />
+              Fund Wallet
+            </Button>
+          </motion.div>
         </div>
-      </div>
+      </motion.div>
 
-      <div className="px-5 mb-5">
+      {/* Insight Carousel */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.2 }}
+        className="px-5 mb-5 relative z-10"
+      >
         <div
           className="relative bg-gradient-to-r from-white/5 to-transparent border border-white/10 rounded-[18px] p-4 overflow-hidden"
           onMouseEnter={() => setIsAutoPlaying(false)}
           onMouseLeave={() => setIsAutoPlaying(true)}
         >
-          {/* Carousel content */}
-          <button onClick={() => setCurrentScreen(currentInsight.action as ScreenType)} className="w-full text-left">
-            <div className="flex items-start gap-3">
-              <div
-                className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                style={{ backgroundColor: `${currentInsight.color}20` }}
-              >
-                <currentInsight.icon size={20} style={{ color: currentInsight.color }} />
+          <AnimatePresence mode="wait">
+            <motion.button
+              key={currentInsightIndex}
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              transition={{ duration: 0.3 }}
+              onClick={() => setCurrentScreen(currentInsight.action as ScreenType)}
+              className="w-full text-left"
+            >
+              <div className="flex items-start gap-3">
+                <motion.div
+                  animate={{ scale: [1, 1.1, 1] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                  className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                  style={{ backgroundColor: `${currentInsight.color}20` }}
+                >
+                  <currentInsight.icon size={20} style={{ color: currentInsight.color }} />
+                </motion.div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white/50 text-[10px] font-medium uppercase tracking-wider mb-0.5">
+                    {currentInsight.title}
+                  </p>
+                  <p className="text-white text-xl font-bold mb-0.5">{currentInsight.value}</p>
+                  <p className="text-white/60 text-xs">{currentInsight.subtitle}</p>
+                </div>
               </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-white/50 text-[10px] font-medium uppercase tracking-wider mb-0.5">
-                  {currentInsight.title}
-                </p>
-                <p className="text-white text-xl font-bold mb-0.5">{currentInsight.value}</p>
-                <p className="text-white/60 text-xs">{currentInsight.subtitle}</p>
-              </div>
-            </div>
-          </button>
+            </motion.button>
+          </AnimatePresence>
 
           {/* Navigation arrows */}
           <div className="absolute top-1/2 -translate-y-1/2 left-2">
@@ -440,91 +501,54 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
             ))}
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Quick Actions */}
-      <div className="px-5 mb-5">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.3 }}
+        className="px-5 mb-5 relative z-10"
+      >
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-white font-bold text-base">Quick Actions</h2>
         </div>
         <div className="grid grid-cols-4 gap-3">
-          <button
-            onClick={() => setCurrentScreen("send")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <Send className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Send</span>
-          </button>
-          <button
-            onClick={() => setCurrentScreen("airtime")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <Smartphone className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Airtime</span>
-          </button>
-          <button
-            onClick={() => setCurrentScreen("data")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <Wifi className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Data</span>
-          </button>
-          <button
-            onClick={() => setCurrentScreen("bills")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <Zap className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Bills</span>
-          </button>
-          <button
-            onClick={() => setCurrentScreen("scan")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <ImageIcon className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Extract to Pay</span>
-          </button>
-          <button
-            onClick={() => setCurrentScreen("shop")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <ShoppingBag className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Shop</span>
-          </button>
-          <button
-            onClick={() => setCurrentScreen("beneficiaries")}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <Plus className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">Beneficiaries</span>
-          </button>
-          <button
-            onClick={() => setShowMoreFeatures(true)}
-            className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
-          >
-            <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
-              <LayoutGrid className="text-[#00FF41]" size={18} />
-            </div>
-            <span className="text-white/90 text-[10px] font-medium text-center leading-tight">More</span>
-          </button>
+          {[
+            { icon: Send, label: "Send", screen: "send" },
+            { icon: Smartphone, label: "Airtime", screen: "airtime" },
+            { icon: Wifi, label: "Data", screen: "data" },
+            { icon: Zap, label: "Bills", screen: "bills" },
+            { icon: ImageIcon, label: "Extract to Pay", screen: "scan" },
+            { icon: ShoppingBag, label: "Shop", screen: "shop" },
+            { icon: Plus, label: "Beneficiaries", screen: "beneficiaries" },
+            { icon: LayoutGrid, label: "More", screen: "more" },
+          ].map((action, index) => (
+            <motion.button
+              key={action.label}
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0.3 + index * 0.05 }}
+              whileTap={{ scale: 0.9 }}
+              onClick={() => action.screen === "more" ? setShowMoreFeatures(true) : setCurrentScreen(action.screen as ScreenType)}
+              className="flex flex-col items-center gap-1.5 p-2 rounded-xl hover:bg-white/5 transition-colors active:bg-white/10"
+            >
+              <div className="w-11 h-11 rounded-[14px] bg-gradient-to-br from-[#00FF41]/10 to-[#00FF41]/5 flex items-center justify-center">
+                <action.icon className="text-[#00FF41]" size={18} />
+              </div>
+              <span className="text-white/90 text-[10px] font-medium text-center leading-tight">{action.label}</span>
+            </motion.button>
+          ))}
         </div>
-      </div>
+      </motion.div>
 
       {/* Recent Activity */}
-      <div className="px-5">
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.4 }}
+        className="px-5 relative z-10"
+      >
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-white font-bold text-base">Recent Activity</h2>
           <button onClick={() => setCurrentScreen("history")} className="text-[#00FF41] text-xs font-bold">
@@ -532,129 +556,116 @@ export default function DashboardScreen({ userId: propUserId }: { userId?: strin
           </button>
         </div>
         <div className="space-y-2.5">
-          <div className="bg-white/[0.03] border border-white/5 rounded-[16px] p-3.5 flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-white/5 flex items-center justify-center flex-shrink-0">
-              <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" className="text-white/40">
-                <path d="M10 2C5.58172 2 2 5.58172 2 10C2 14.4183 5.58172 18 10 18C14.4183 18 18 14.4183 18 10C18 5.58172 14.4183 2 10 2ZM10 4C13.3137 4 16 6.68629 16 10C16 13.3137 13.3137 16 10 16C6.68629 16 4 13.3137 4 10C4 6.68629 6.68629 4 10 4Z" />
-              </svg>
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white font-semibold text-sm">Uber Ride</p>
-              <p className="text-white/40 text-[11px]">Today, 8:42 PM</p>
-            </div>
-            <span className="text-white font-bold text-sm flex-shrink-0">-NGN 2,500</span>
-          </div>
-          <div className="bg-white/[0.03] border border-white/5 rounded-[16px] p-3.5 flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#00FF41]/10 flex items-center justify-center flex-shrink-0">
-              <ArrowDownToLine className="text-[#00FF41]" size={16} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white font-semibold text-sm">Jade Adeleye</p>
-              <p className="text-white/40 text-[11px]">Yesterday, 6:20 PM</p>
-            </div>
-            <span className="text-[#00FF41] font-bold text-sm flex-shrink-0">+NGN 50,000</span>
-          </div>
-          <div className="bg-white/[0.03] border border-white/5 rounded-[16px] p-3.5 flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-white/5 flex items-center justify-center flex-shrink-0">
-              <ShoppingBag className="text-white/40" size={16} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white font-semibold text-sm">Jumia Order</p>
-              <p className="text-white/40 text-[11px]">Yesterday, 2:15 PM</p>
-            </div>
-            <span className="text-white font-bold text-sm flex-shrink-0">-NGN 18,300</span>
-          </div>
+          {(recentTransactions ?? []).length === 0 && (
+            <p className="text-white/40 text-sm text-center py-6">
+              No transactions yet. Fund your wallet (demo top-up) to get started.
+            </p>
+          )}
+          {(recentTransactions ?? []).slice(0, 3).map((tx) => {
+            const isCredit = tx.type === "credit"
+            return (
+              <motion.div
+                key={tx._id}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                whileTap={{ scale: 0.98 }}
+                className="bg-white/[0.03] border border-white/5 rounded-[16px] p-3.5 flex items-center gap-3"
+              >
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${isCredit ? 'bg-[#00FF41]/10' : 'bg-white/5'}`}>
+                  {isCredit ? (
+                    <ArrowDownToLine className="text-[#00FF41]" size={16} />
+                  ) : (
+                    <ShoppingBag className="text-white/40" size={16} />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white font-semibold text-sm truncate">{tx.description}</p>
+                  <p className="text-white/40 text-[11px]">
+                    {new Date(tx.createdAt).toLocaleString("en-NG")} • {tx.status}
+                  </p>
+                </div>
+                <span className={`font-bold text-sm flex-shrink-0 ${isCredit ? 'text-[#00FF41]' : 'text-white'}`}>
+                  {isCredit ? "+" : "-"}NGN {tx.amount.toLocaleString()}
+                </span>
+              </motion.div>
+            )
+          })}
         </div>
-      </div>
+      </motion.div>
 
-      <div className="fixed bottom-0 left-0 right-0 bg-[#0a1a12]/95 backdrop-blur-xl border-t border-white/5 px-4 py-2 shadow-2xl">
+      {/* Bottom Navigation */}
+      <motion.div
+        initial={{ y: 100 }}
+        animate={{ y: 0 }}
+        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+        className="fixed bottom-0 left-0 right-0 bg-[#0a1a12]/95 backdrop-blur-xl border-t border-white/5 px-4 py-2 shadow-2xl z-20"
+      >
         <div className="flex items-center justify-around max-w-md mx-auto relative">
           {/* Home Tab */}
-          <button
-            onClick={() => {
-              setActiveTab("home")
-              setCurrentScreen("dashboard")
-            }}
-            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "home" ? "bg-[#00FF41]/10" : ""
-              }`}
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={() => { setActiveTab("home"); setCurrentScreen("dashboard") }}
+            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "home" ? "bg-[#00FF41]/10" : ""}`}
           >
-            <div className="w-6 h-6 flex items-center justify-center">
-              <Wallet size={22} className={activeTab === "home" ? "text-[#00FF41]" : "text-white/30"} />
-            </div>
-            <span
-              className={`text-[10px] ${activeTab === "home" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}
-            >
+            <Wallet size={22} className={activeTab === "home" ? "text-[#00FF41]" : "text-white/30"} />
+            <span className={`text-[10px] ${activeTab === "home" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}>
               Home
             </span>
-          </button>
+          </motion.button>
 
-          {/* Kumba Chat Tab - goes to chat interface */}
-          <button
-            onClick={() => {
-              setActiveTab("kumba")
-              setCurrentScreen("kumbaChat")
-            }}
-            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "kumba" ? "bg-[#00FF41]/10" : ""
-              }`}
+          {/* Kumba Chat Tab */}
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={() => { setActiveTab("kumba"); setCurrentScreen("kumbaChat") }}
+            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "kumba" ? "bg-[#00FF41]/10" : ""}`}
           >
-            <div className="w-6 h-6 flex items-center justify-center">
-              <MessageCircle size={22} className={activeTab === "kumba" ? "text-[#00FF41]" : "text-white/30"} />
-            </div>
-            <span
-              className={`text-[10px] ${activeTab === "kumba" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}
-            >
+            <MessageCircle size={22} className={activeTab === "kumba" ? "text-[#00FF41]" : "text-white/30"} />
+            <span className={`text-[10px] ${activeTab === "kumba" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}>
               Kumba
             </span>
-          </button>
+          </motion.button>
 
-          {/* Center Mic Button - opens voice modal */}
-          <button onClick={() => setShowVoiceModal(true)} className="flex flex-col items-center -mt-6">
+          {/* Center Mic Button */}
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={() => setShowVoiceModal(true)}
+            className="flex flex-col items-center -mt-6"
+          >
             <div className="w-16 h-16 rounded-full bg-[#00FF41] flex items-center justify-center shadow-lg shadow-[#00FF41]/40 active:scale-95 transition-transform border-4 border-[#0a1a12] relative overflow-hidden">
-              {/* Animated pulse rings */}
-              <div className="absolute inset-0 rounded-full bg-white/20 animate-ping opacity-30" />
+              <motion.div
+                animate={{ scale: [1, 1.4, 1], opacity: [0.4, 0, 0.4] }}
+                transition={{ duration: 2, repeat: Infinity }}
+                className="absolute inset-0 rounded-full bg-white/20"
+              />
               <Mic className="text-black relative z-10" size={28} strokeWidth={2.5} />
             </div>
-          </button>
+          </motion.button>
 
-          {/* Budget Tab - shows budget analytics */}
-          <button
-            onClick={() => {
-              setActiveTab("budget")
-              setCurrentScreen("budgetAnalytics")
-            }}
-            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "budget" ? "bg-[#00FF41]/10" : ""
-              }`}
+          {/* Budget Tab */}
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={() => { setActiveTab("budget"); setCurrentScreen("budgetAnalytics") }}
+            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "budget" ? "bg-[#00FF41]/10" : ""}`}
           >
-            <div className="w-6 h-6 flex items-center justify-center">
-              <PiggyBank size={22} className={activeTab === "budget" ? "text-[#00FF41]" : "text-white/30"} />
-            </div>
-            <span
-              className={`text-[10px] ${activeTab === "budget" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}
-            >
+            <PiggyBank size={22} className={activeTab === "budget" ? "text-[#00FF41]" : "text-white/30"} />
+            <span className={`text-[10px] ${activeTab === "budget" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}>
               Budget
             </span>
-          </button>
+          </motion.button>
 
-          {/* Analytics Tab - shows transaction analytics */}
-          <button
-            onClick={() => {
-              setActiveTab("analytics")
-              setCurrentScreen("transactionAnalytics")
-            }}
-            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "analytics" ? "bg-[#00FF41]/10" : ""
-              }`}
+          {/* Analytics Tab */}
+          <motion.button
+            whileTap={{ scale: 0.9 }}
+            onClick={() => { setActiveTab("analytics"); setCurrentScreen("transactionAnalytics") }}
+            className={`flex flex-col items-center gap-0.5 py-1.5 px-4 rounded-2xl transition-all duration-300 ${activeTab === "analytics" ? "bg-[#00FF41]/10" : ""}`}
           >
-            <div className="w-6 h-6 flex items-center justify-center">
-              <BarChart3 size={22} className={activeTab === "analytics" ? "text-[#00FF41]" : "text-white/30"} />
-            </div>
-            <span
-              className={`text-[10px] ${activeTab === "analytics" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}
-            >
+            <BarChart3 size={22} className={activeTab === "analytics" ? "text-[#00FF41]" : "text-white/30"} />
+            <span className={`text-[10px] ${activeTab === "analytics" ? "text-[#00FF41] font-bold" : "text-white/30 font-medium"}`}>
               Analytics
             </span>
-          </button>
+          </motion.button>
         </div>
-      </div>
+      </motion.div>
 
       {/* More Features Bottom Sheet */}
       <MoreFeaturesBottomSheet

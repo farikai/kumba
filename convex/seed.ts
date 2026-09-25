@@ -1,10 +1,15 @@
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { generateSalt, hashPin, requireSession, PIN_HASH_VERSION } from "./lib/auth";
 
-// Seed demo data for development
+// Seed demo data for development.
+// DEV ONLY: creates a shared account with a known PIN. Requires an
+// authenticated session so anonymous callers cannot mint it in
+// deployed environments, and never run this against production data.
 export const seedDemoData = mutation({
-    args: {},
-    handler: async (ctx) => {
+    args: { userId: v.id("users"), sessionToken: v.string() },
+    handler: async (ctx, args) => {
+        await requireSession(ctx, args.userId, args.sessionToken);
         // Check if demo user already exists
         const existing = await ctx.db
             .query("users")
@@ -13,18 +18,24 @@ export const seedDemoData = mutation({
 
         if (existing) return { userId: existing._id, message: "Demo data already exists" };
 
-        // Create demo user
+        // Create demo user (dev PIN "0000", stored as salted hash)
+        const salt = await generateSalt();
         const userId = await ctx.db.insert("users", {
             name: "Adewale Johnson",
             phone: "+2348012345678",
             tag: "@adewalejohnson",
+            pinHash: await hashPin("0000", salt),
+            pinSalt: salt,
+            pinHashV: PIN_HASH_VERSION,
+            kycStatus: "none",
             createdAt: Date.now(),
         });
 
-        // Create wallet with starter balance
+        // Create wallet with starter balance (whole naira — balances are
+        // stored as numbers; keep kobo out of seeds to avoid float dust)
         await ctx.db.insert("wallets", {
             userId,
-            balance: 842300.5,
+            balance: 842300,
             currency: "NGN",
             updatedAt: Date.now(),
         });

@@ -1,10 +1,15 @@
 "use client"
 
 import { useState } from "react"
-import { ArrowLeft, TrendingUp, TrendingDown, ArrowUpRight, ArrowDownRight, Filter, Download, Bot } from "lucide-react"
+import { useQuery } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
+import { ArrowLeft, ArrowUpRight, ArrowDownRight, Filter, Download, Bot } from "lucide-react"
 
 interface TransactionAnalyticsScreenProps {
   onBack: () => void
+  userId?: string | null
 }
 
 // Comprehensive transaction analytics data
@@ -54,9 +59,87 @@ const analyticsData = {
   ],
 }
 
-export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyticsScreenProps) {
+export default function TransactionAnalyticsScreen({ onBack, userId }: TransactionAnalyticsScreenProps) {
   const [selectedPeriod, setSelectedPeriod] = useState<"week" | "month" | "quarter" | "year">("month")
   const [activeTab, setActiveTab] = useState<"overview" | "inflow" | "outflow">("overview")
+  const { session } = useSession()
+  const effectiveUserId = (session?.userId ?? userId) as Id<"users"> | undefined
+  const liveSummary = useQuery(
+    api.analytics.getMonthlySummary,
+    effectiveUserId && session?.sessionToken
+      ? { userId: effectiveUserId, sessionToken: session.sessionToken }
+      : "skip"
+  )
+  const summary = liveSummary
+    ? {
+        totalInflow: liveSummary.income,
+        totalOutflow: liveSummary.expenses,
+        netFlow: liveSummary.income - liveSummary.expenses,
+        transactionCount: liveSummary.transactionCount,
+      }
+    : { totalInflow: 0, totalOutflow: 0, netFlow: 0, transactionCount: 0 }
+
+  // Counterparty + category breakdowns computed from YOUR real
+  // transactions (previously hardcoded sample data).
+  const recentTx = useQuery(
+    api.wallet.getTransactions,
+    effectiveUserId && session?.sessionToken
+      ? { userId: effectiveUserId, sessionToken: session.sessionToken, limit: 200 }
+      : "skip"
+  ) ?? []
+
+  const byCategory = liveSummary?.byCategory ?? {}
+  const totalCat = Object.values(byCategory).reduce((s: number, v) => s + (v as number), 0)
+  const liveCategories = Object.entries(byCategory)
+    .map(([name, amount]) => ({
+      name,
+      amount: amount as number,
+      percentage: totalCat > 0 ? Math.round(((amount as number) / totalCat) * 100) : 0,
+    }))
+    .sort((a, b) => b.amount - a.amount)
+
+  const aggregateBy = (txs: typeof recentTx, key: (t: (typeof recentTx)[number]) => string) => {
+    const map = new Map<string, { amount: number; count: number }>()
+    for (const t of txs) {
+      const k = key(t) || "Other"
+      const entry = map.get(k) ?? { amount: 0, count: 0 }
+      entry.amount += t.amount
+      entry.count += 1
+      map.set(k, entry)
+    }
+    return [...map.entries()]
+      .map(([name, v]) => ({ name, ...v }))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 8)
+  }
+  const liveTopRecipients = aggregateBy(
+    recentTx.filter((t) => t.type === "debit" && t.status === "completed"),
+    (t) => t.recipientName ?? t.description
+  )
+  const liveTopSenders = aggregateBy(
+    recentTx.filter((t) => t.type === "credit" && t.status === "completed"),
+    (t) => t.description
+  )
+
+  // Rule-based insights derived from real numbers (not canned strings).
+  const liveInsights: string[] = []
+  if (liveCategories.length > 0) {
+    const top = liveCategories[0]
+    liveInsights.push(
+      `Your biggest spending category is ${top.name} at ₦${top.amount.toLocaleString()} (${top.percentage}% of outflow this month).`
+    )
+  }
+  if (summary.totalInflow > 0) {
+    const rate = Math.round(((summary.totalInflow - summary.totalOutflow) / summary.totalInflow) * 100)
+    liveInsights.push(
+      rate >= 0
+        ? `You saved ~${rate}% of inflow this month (₦${summary.netFlow.toLocaleString()} net).`
+        : `You spent ₦${Math.abs(summary.netFlow).toLocaleString()} more than you received this month.`
+    )
+  }
+  if (liveInsights.length === 0) {
+    liveInsights.push("No completed transactions this month yet — insights will appear here once you transact.")
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#0a1a12] via-[#0d1f16] to-[#0a1a12] pb-24">
@@ -107,7 +190,7 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
                 <span className="text-white/50 text-xs">Total Inflow</span>
               </div>
               <p className="text-[#00FF41] font-bold text-xl">
-                ₦{(analyticsData.summary.totalInflow / 1000).toFixed(0)}k
+                ₦{(summary.totalInflow / 1000).toFixed(0)}k
               </p>
             </div>
             <div>
@@ -116,7 +199,7 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
                 <span className="text-white/50 text-xs">Total Outflow</span>
               </div>
               <p className="text-red-400 font-bold text-xl">
-                ₦{(analyticsData.summary.totalOutflow / 1000).toFixed(0)}k
+                ₦{(summary.totalOutflow / 1000).toFixed(0)}k
               </p>
             </div>
           </div>
@@ -124,39 +207,37 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
           <div className="border-t border-white/10 pt-4 flex items-center justify-between">
             <div>
               <span className="text-white/50 text-xs">Net Flow</span>
-              <p className="text-white font-bold text-lg">₦{analyticsData.summary.netFlow.toLocaleString()}</p>
+              <p className="text-white font-bold text-lg">₦{summary.netFlow.toLocaleString()}</p>
             </div>
             <div className="text-right">
               <span className="text-white/50 text-xs">Transactions</span>
-              <p className="text-white font-bold text-lg">{analyticsData.summary.transactionCount}</p>
+              <p className="text-white font-bold text-lg">{summary.transactionCount}</p>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Flow Chart Visual */}
+      {/* Flow Chart Visual — current month only (history beyond the
+          live window is not fabricated) */}
       <div className="px-5 mb-5">
-        <h2 className="text-white font-bold text-sm mb-3">Monthly Cash Flow</h2>
+        <h2 className="text-white font-bold text-sm mb-3">This Month&apos;s Cash Flow</h2>
         <div className="bg-white/[0.03] border border-white/5 rounded-2xl p-4">
-          <div className="flex items-end justify-between h-32 gap-2">
-            {analyticsData.monthlyFlow.map((month, index) => {
-              const maxValue = Math.max(...analyticsData.monthlyFlow.map((m) => Math.max(m.inflow, m.outflow)))
-              const inflowHeight = (month.inflow / maxValue) * 100
-              const outflowHeight = (month.outflow / maxValue) * 100
-
+          <div className="flex items-end justify-center h-32 gap-6">
+            {[
+              { label: "In", value: summary.totalInflow, color: "bg-[#00FF41]" },
+              { label: "Out", value: summary.totalOutflow, color: "bg-red-400" },
+            ].map((bar) => {
+              const maxValue = Math.max(summary.totalInflow, summary.totalOutflow, 1)
               return (
-                <div key={index} className="flex-1 flex flex-col items-center gap-1">
-                  <div className="flex items-end gap-1 h-24">
+                <div key={bar.label} className="flex flex-col items-center gap-1">
+                  <span className="text-white/60 text-[10px]">₦{bar.value.toLocaleString()}</span>
+                  <div className="flex items-end h-24">
                     <div
-                      className="w-3 bg-[#00FF41] rounded-t transition-all duration-500"
-                      style={{ height: `${inflowHeight}%` }}
-                    />
-                    <div
-                      className="w-3 bg-red-400 rounded-t transition-all duration-500"
-                      style={{ height: `${outflowHeight}%` }}
+                      className={`w-10 ${bar.color} rounded-t transition-all duration-500`}
+                      style={{ height: `${Math.max(4, (bar.value / maxValue) * 100)}%` }}
                     />
                   </div>
-                  <span className="text-white/40 text-[10px]">{month.month}</span>
+                  <span className="text-white/40 text-[10px]">{bar.label}</span>
                 </div>
               )
             })}
@@ -201,7 +282,10 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
       {activeTab === "overview" && (
         <div className="px-5 mb-5">
           <div className="space-y-2">
-            {analyticsData.categories.map((category, index) => (
+            {liveCategories.length === 0 && (
+              <p className="text-white/40 text-sm text-center py-6">No spending this month yet.</p>
+            )}
+            {liveCategories.map((category, index) => (
               <div key={index} className="bg-white/[0.03] border border-white/5 rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div>
@@ -210,19 +294,6 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
                   </div>
                   <div className="text-right">
                     <p className="text-white font-bold text-sm">₦{category.amount.toLocaleString()}</p>
-                    <div
-                      className={`flex items-center gap-1 text-xs ${
-                        category.trend === "up"
-                          ? "text-red-400"
-                          : category.trend === "down"
-                            ? "text-[#00FF41]"
-                            : "text-white/40"
-                      }`}
-                    >
-                      {category.trend === "up" && <TrendingUp size={12} />}
-                      {category.trend === "down" && <TrendingDown size={12} />}
-                      {category.trendValue > 0 && `${category.trendValue}%`}
-                    </div>
                   </div>
                 </div>
                 <div className="w-full h-2 bg-white/10 rounded-full overflow-hidden">
@@ -241,7 +312,10 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
       {activeTab === "inflow" && (
         <div className="px-5 mb-5">
           <div className="space-y-2">
-            {analyticsData.topSenders.map((sender, index) => (
+            {liveTopSenders.length === 0 && (
+              <p className="text-white/40 text-sm text-center py-6">No inflow this month yet.</p>
+            )}
+            {liveTopSenders.map((sender, index) => (
               <div
                 key={index}
                 className="bg-white/[0.03] border border-white/5 rounded-2xl p-4 flex items-center justify-between"
@@ -268,7 +342,10 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
       {activeTab === "outflow" && (
         <div className="px-5 mb-5">
           <div className="space-y-2">
-            {analyticsData.topRecipients.map((recipient, index) => (
+            {liveTopRecipients.length === 0 && (
+              <p className="text-white/40 text-sm text-center py-6">No outflow this month yet.</p>
+            )}
+            {liveTopRecipients.map((recipient, index) => (
               <div
                 key={index}
                 className="bg-white/[0.03] border border-white/5 rounded-2xl p-4 flex items-center justify-between"
@@ -299,7 +376,7 @@ export default function TransactionAnalyticsScreen({ onBack }: TransactionAnalyt
             <span className="text-[#00FF41] font-bold text-sm">Kumba AI Analysis</span>
           </div>
           <div className="space-y-2">
-            {analyticsData.aiInsights.map((insight, index) => (
+            {liveInsights.map((insight, index) => (
               <p key={index} className="text-white/70 text-xs leading-relaxed flex items-start gap-2">
                 <span className="text-[#00FF41]">•</span>
                 {insight}

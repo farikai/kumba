@@ -7,7 +7,27 @@ export default defineSchema({
         phone: v.string(),
         tag: v.optional(v.string()),
         avatarUrl: v.optional(v.string()),
+        // DEPRECATED (pre-auth build): plaintext PIN. Never written anymore;
+        // login() migrates it to pinHash on first successful use, then clears it.
         transactionPin: v.optional(v.string()),
+        // Salted + stretched PIN credential (see convex/lib/auth.ts).
+        // pinHashV tracks the KDF version: 1 = legacy single-round
+        // SHA-256, 2 = iterated (current). Absent means v1.
+        pinHash: v.optional(v.string()),
+        pinSalt: v.optional(v.string()),
+        pinHashV: v.optional(v.number()),
+        // Bearer session token issued at register/login. Every user-scoped
+        // function must verify it via requireSession().
+        sessionToken: v.optional(v.string()),
+        sessionCreatedAt: v.optional(v.number()),
+        // Brute-force guard for PIN verification.
+        pinFailCount: v.optional(v.number()),
+        pinLockedUntil: v.optional(v.number()),
+        // Self-attested KYC only (no verification provider wired). Never
+        // store full BVN/NIN values — last4 at most.
+        kycStatus: v.optional(v.union(v.literal("none"), v.literal("self_attested"))),
+        kycIdType: v.optional(v.union(v.literal("bvn"), v.literal("nin"))),
+        kycLast4: v.optional(v.string()),
         createdAt: v.number(),
     }).index("by_phone", ["phone"]),
 
@@ -36,10 +56,15 @@ export default defineSchema({
         recipientName: v.optional(v.string()),
         reference: v.optional(v.string()),
         category: v.optional(v.string()),
+        // Client-supplied idempotency key. Mutations that create money
+        // movements must check (userId, idempotencyKey) before inserting
+        // so retries and double-submits cannot double-spend.
+        idempotencyKey: v.optional(v.string()),
         createdAt: v.number(),
     })
         .index("by_userId", ["userId"])
-        .index("by_userId_createdAt", ["userId", "createdAt"]),
+        .index("by_userId_createdAt", ["userId", "createdAt"])
+        .index("by_userId_idempotencyKey", ["userId", "idempotencyKey"]),
 
     beneficiaries: defineTable({
         userId: v.id("users"),
@@ -66,8 +91,13 @@ export default defineSchema({
         isActive: v.boolean(),
         description: v.optional(v.string()),
         icon: v.optional(v.string()),
+        // Client-generated idempotency key: retries with the same key
+        // return the existing schedule instead of creating a duplicate.
+        idempotencyKey: v.optional(v.string()),
         createdAt: v.number(),
-    }).index("by_userId", ["userId"]),
+    }).index("by_userId", ["userId"])
+      .index("by_active_nextDate", ["isActive", "nextPaymentDate"])
+      .index("by_userId_idempotencyKey", ["userId", "idempotencyKey"]),
 
     budgets: defineTable({
         userId: v.id("users"),
@@ -105,9 +135,16 @@ export default defineSchema({
         status: v.union(v.literal("pending"), v.literal("completed"), v.literal("failed")),
         reference: v.string(),
         deliveryAddress: v.optional(v.string()),
+        // Marketplace linkage (absent for seeded-catalog orders). sellerId
+        // is ALWAYS derived server-side from the sellerProduct — never
+        // trusted from the client — so sellers only see their own orders.
+        sellerId: v.optional(v.id("sellers")),
+        sellerProductId: v.optional(v.id("sellerProducts")),
         createdAt: v.number(),
     })
         .index("by_userId", ["userId"])
+        .index("by_store", ["store"])
+        .index("by_sellerId", ["sellerId"])
         .index("by_userId_createdAt", ["userId", "createdAt"]),
 
     sellers: defineTable({
@@ -143,6 +180,11 @@ export default defineSchema({
         status: v.union(v.literal("draft"), v.literal("pending_review"), v.literal("active"), v.literal("out_of_stock"), v.literal("rejected")),
         commissionRate: v.number(), // override default
         tags: v.array(v.string()),
+        // Publishing attribution (building stage: sellers self-publish;
+        // no admin review queue exists yet — these fields make every
+        // publish attributable for future moderation).
+        approvedBy: v.optional(v.id("users")),
+        approvedAt: v.optional(v.number()),
         createdAt: v.number(),
         updatedAt: v.number(),
     })
@@ -157,6 +199,7 @@ export default defineSchema({
         amount: v.number(),
         status: v.union(v.literal("pending"), v.literal("processing"), v.literal("completed"), v.literal("failed")),
         reference: v.string(),
+        orderId: v.optional(v.id("orders")),
         periodStart: v.number(),
         periodEnd: v.number(),
         createdAt: v.number(),

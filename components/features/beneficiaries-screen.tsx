@@ -15,14 +15,20 @@ import {
   CheckCircle2,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
+import { useQuery, useMutation, useAction } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 
 interface BeneficiariesScreenProps {
   onBack: () => void
+  userId?: Id<"users"> | string | null
   onSelectBeneficiary?: (beneficiary: Beneficiary) => void
 }
 
 interface Beneficiary {
   id: number
+  _convexId?: string
   name: string
   bank: string
   accountNumber: string
@@ -47,11 +53,21 @@ const banks = [
   "Sterling Bank",
 ]
 
-export default function BeneficiariesScreen({ onBack, onSelectBeneficiary }: BeneficiariesScreenProps) {
+export default function BeneficiariesScreen({ onBack, userId, onSelectBeneficiary }: BeneficiariesScreenProps) {
   const [searchQuery, setSearchQuery] = useState("")
   const [viewMode, setViewMode] = useState<ViewMode>("list")
   const [selectedBeneficiary, setSelectedBeneficiary] = useState<Beneficiary | null>(null)
   const [showActionMenu, setShowActionMenu] = useState<number | null>(null)
+  const { session } = useSession()
+  const effectiveUserId = (session?.userId ?? userId) as Id<"users"> | undefined
+  const authed = effectiveUserId && session?.sessionToken
+    ? { userId: effectiveUserId, sessionToken: session.sessionToken }
+    : "skip"
+  const liveBeneficiaries = useQuery(api.beneficiaries.getAll, authed)
+  const addBeneficiary = useMutation(api.beneficiaries.add)
+  const updateBeneficiary = useMutation(api.beneficiaries.update)
+  const removeBeneficiary = useMutation(api.beneficiaries.remove)
+  const lookupAccount = useAction((api as any).actions["9psb"].lookupAccount)
 
   // Form state
   const [formData, setFormData] = useState({
@@ -61,111 +77,113 @@ export default function BeneficiariesScreen({ onBack, onSelectBeneficiary }: Ben
   })
   const [isVerifying, setIsVerifying] = useState(false)
   const [verifiedName, setVerifiedName] = useState("")
+  const [formError, setFormError] = useState("")
 
-  const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>([
-    {
-      id: 1,
-      name: "Amara Okeke",
-      bank: "Access Bank",
-      accountNumber: "0123456789",
-      initials: "AO",
-      color: "bg-orange-400",
-      lastUsed: "Oct 12",
-      isFavorite: true,
-    },
-    {
-      id: 2,
-      name: "Babatunde Adebayo",
-      bank: "GTBank",
-      accountNumber: "1234567890",
-      initials: "BA",
-      color: "bg-teal-500",
-      lastUsed: "Oct 14",
-      isFavorite: true,
-    },
-    {
-      id: 3,
-      name: "Chinedu Eze",
-      bank: "Zenith Bank",
-      accountNumber: "2345678901",
-      initials: "CE",
-      color: "bg-pink-400",
-      lastUsed: "Oct 12",
-    },
-    {
-      id: 4,
-      name: "Funke Ojo",
-      bank: "Kuda Bank",
-      accountNumber: "3456789012",
-      initials: "FO",
-      color: "bg-purple-500",
-      lastUsed: "Sep 11",
-    },
-    {
-      id: 5,
-      name: "Grace Okafor",
-      bank: "First Bank",
-      accountNumber: "4567890123",
-      initials: "GO",
-      color: "bg-yellow-500",
-      lastUsed: "Sep 28",
-    },
-  ])
+  // Real saved beneficiaries only. The previous build showed five
+  // hardcoded fake contacts here; an empty wallet now shows empty.
+  const displayBeneficiaries: Beneficiary[] = (liveBeneficiaries ?? []).map((b: any, i: number) => ({
+    id: i + 1000,
+    _convexId: b._id,
+    name: b.name,
+    bank: b.bankName,
+    accountNumber: b.accountNumber,
+    initials: b.name.split(" ").map((n: string) => n[0]).join("").toUpperCase().slice(0, 2),
+    color: "bg-teal-500",
+    lastUsed: undefined as string | undefined,
+    isFavorite: b.isFavorite,
+  }))
 
-  const frequentContacts = beneficiaries.filter((b) => b.isFavorite)
+  const frequentContacts = displayBeneficiaries.filter((b) => b.isFavorite)
 
-  const filteredBeneficiaries = beneficiaries.filter(
+  const filteredBeneficiaries = displayBeneficiaries.filter(
     (b) =>
       b.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       b.bank.toLowerCase().includes(searchQuery.toLowerCase()) ||
       b.accountNumber.includes(searchQuery),
   )
 
-  const handleVerifyAccount = () => {
+  // Bank name → NIP bank code for the lookup action.
+  const bankCodeFor = (bankName: string) => {
+    const codes: Record<string, string> = {
+      "Access Bank": "044", GTBank: "058", "Zenith Bank": "057", "First Bank": "011",
+      UBA: "033", "Kuda Bank": "090267", Opay: "100004", Palmpay: "100033",
+      "Stanbic IBTC": "221", "Sterling Bank": "232",
+    }
+    return codes[bankName] ?? ""
+  }
+
+  const handleVerifyAccount = async () => {
     if (formData.accountNumber.length === 10 && formData.bank) {
       setIsVerifying(true)
-      setTimeout(() => {
-        setVerifiedName(formData.name || "John Doe")
+      setFormError("")
+      try {
+        if (!session) throw new Error("You are not logged in.")
+        const code = bankCodeFor(formData.bank)
+        if (!code) throw new Error("Unsupported bank for verification")
+        const result = await lookupAccount({
+          userId: session.userId as Id<"users">,
+          sessionToken: session.sessionToken,
+          accountNumber: formData.accountNumber,
+          bankCode: code,
+        })
+        if (result?.success && result?.data?.accountName) {
+          // Sandbox names are explicitly UNVERIFIED (see convex/lib/9psb.ts).
+          setVerifiedName(result.data.accountName)
+        } else {
+          throw new Error(result?.error?.message ?? "Verification failed")
+        }
+      } catch (e) {
+        setFormError(e instanceof Error ? e.message : "Verification failed")
+        setVerifiedName("")
+      } finally {
         setIsVerifying(false)
-      }, 1500)
-    }
-  }
-
-  const handleSaveBeneficiary = () => {
-    const initials = formData.name
-      .split(" ")
-      .map((n) => n[0])
-      .join("")
-      .toUpperCase()
-      .slice(0, 2)
-    const colors = ["bg-orange-400", "bg-teal-500", "bg-pink-400", "bg-purple-500", "bg-yellow-500", "bg-blue-500"]
-    const randomColor = colors[Math.floor(Math.random() * colors.length)]
-
-    if (viewMode === "edit" && selectedBeneficiary) {
-      setBeneficiaries(
-        beneficiaries.map((b) =>
-          b.id === selectedBeneficiary.id
-            ? { ...b, name: formData.name, bank: formData.bank, accountNumber: formData.accountNumber, initials }
-            : b,
-        ),
-      )
-    } else {
-      const newBeneficiary: Beneficiary = {
-        id: Date.now(),
-        name: formData.name,
-        bank: formData.bank,
-        accountNumber: formData.accountNumber,
-        initials,
-        color: randomColor,
-        lastUsed: "Just now",
       }
-      setBeneficiaries([newBeneficiary, ...beneficiaries])
     }
-    setViewMode("success")
   }
 
-  const handleDeleteBeneficiary = (id: number) => {
-    setBeneficiaries(beneficiaries.filter((b) => b.id !== id))
+  const handleSaveBeneficiary = async () => {
+    setFormError("")
+    if (!effectiveUserId || !session?.sessionToken) {
+      setFormError("You are not logged in.")
+      return
+    }
+    try {
+      if (viewMode === "edit" && selectedBeneficiary?._convexId) {
+        await updateBeneficiary({
+          userId: effectiveUserId,
+          sessionToken: session.sessionToken,
+          beneficiaryId: selectedBeneficiary._convexId as Id<"beneficiaries">,
+          name: formData.name,
+          bankName: formData.bank,
+          accountNumber: formData.accountNumber,
+        })
+      } else {
+        await addBeneficiary({
+          userId: effectiveUserId,
+          sessionToken: session.sessionToken,
+          name: formData.name || verifiedName || "Unnamed",
+          bankName: formData.bank,
+          accountNumber: formData.accountNumber,
+        })
+      }
+      setViewMode("success")
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : "Could not save beneficiary.")
+    }
+  }
+
+  const handleDeleteBeneficiary = async (id: number) => {
+    const target: any = displayBeneficiaries.find((b: any) => b.id === id)
+    if (target?._convexId) {
+      if (!effectiveUserId || !session?.sessionToken) return
+      try {
+        await removeBeneficiary({
+          userId: effectiveUserId,
+          sessionToken: session.sessionToken,
+          beneficiaryId: target._convexId,
+        })
+      } catch {}
+    }
     setShowActionMenu(null)
     if (selectedBeneficiary?.id === id) {
       setSelectedBeneficiary(null)
@@ -320,6 +338,9 @@ export default function BeneficiariesScreen({ onBack, onSelectBeneficiary }: Ben
           </div>
 
           {/* Save Button */}
+          {formError && (
+            <p className="text-red-400 text-sm text-center animate-pulse">{formError}</p>
+          )}
           <button
             onClick={handleSaveBeneficiary}
             disabled={!formData.bank || formData.accountNumber.length !== 10}

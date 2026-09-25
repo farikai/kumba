@@ -19,6 +19,12 @@ export default function QrScannerScreen({ onBack, onScanComplete }: QrScannerScr
   const [cameraActive, setCameraActive] = useState(false)
   const [useSimulated, setUseSimulated] = useState(false)
   const [showOcrResult, setShowOcrResult] = useState(false)
+  const [manualCode, setManualCode] = useState("")
+  const [showManualEntry, setShowManualEntry] = useState(false)
+  const [parsedResult, setParsedResult] = useState<
+    { accountNumber: string; accountName: string; bankName: string } | undefined
+  >(undefined)
+  const [parseError, setParseError] = useState("")
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -89,9 +95,59 @@ export default function QrScannerScreen({ onBack, onScanComplete }: QrScannerScr
 
   const handleSimulatedScan = () => {
     if (mode === "account") {
+      // No real frame analysis in this demo path — show sample data
+      // explicitly labeled as demo (see OcrResultSheet).
+      setParsedResult(undefined)
       setShowOcrResult(true)
     } else if (onScanComplete) {
       onScanComplete()
+    }
+  }
+
+  /**
+   * Parse a structured payment code. Supports:
+   * - kumba://pay?account=0123456789&bank=GTBank&name=Joy&amount=5000
+   * - {"accountNumber":"...","bankName":"...","accountName":"..."}
+   * - a bare 10-digit account number
+   * Anything else is rejected instead of guessed.
+   */
+  const parseQrPayload = (raw: string) => {
+    const text = raw.trim()
+    if (/^\d{10}$/.test(text)) {
+      return { accountNumber: text, accountName: "Unknown (enter name)", bankName: "Unknown bank" }
+    }
+    if (text.startsWith("kumba://pay")) {
+      const query = text.split("?")[1] ?? ""
+      const params = new URLSearchParams(query)
+      const account = params.get("account") ?? ""
+      if (!/^\d{10}$/.test(account)) throw new Error("Code is missing a valid 10-digit account number")
+      return {
+        accountNumber: account,
+        accountName: params.get("name") ?? "Unknown (enter name)",
+        bankName: params.get("bank") ?? "Unknown bank",
+      }
+    }
+    if (text.startsWith("{")) {
+      const obj = JSON.parse(text)
+      const account = String(obj.accountNumber ?? "")
+      if (!/^\d{10}$/.test(account)) throw new Error("Code is missing a valid 10-digit account number")
+      return {
+        accountNumber: account,
+        accountName: String(obj.accountName ?? "Unknown (enter name)"),
+        bankName: String(obj.bankName ?? "Unknown bank"),
+      }
+    }
+    throw new Error("Unrecognized code format. Expected kumba://pay, JSON, or a 10-digit account number.")
+  }
+
+  const handleManualSubmit = () => {
+    try {
+      setParsedResult(parseQrPayload(manualCode))
+      setParseError("")
+      setShowManualEntry(false)
+      setShowOcrResult(true)
+    } catch (e) {
+      setParseError(e instanceof Error ? e.message : "Could not read that code.")
     }
   }
 
@@ -145,7 +201,7 @@ export default function QrScannerScreen({ onBack, onScanComplete }: QrScannerScr
         </button>
         <div className="flex items-center gap-2 bg-[#00FF41]/20 backdrop-blur-sm px-3 py-1.5 rounded-full border border-[#00FF41]/30">
           <div className="w-2 h-2 bg-[#00FF41] rounded-full animate-pulse" />
-          <span className="text-[#00FF41] text-xs font-bold">AI SCAN ACTIVE</span>
+          <span className="text-[#00FF41] text-xs font-bold">DEMO SCANNER</span>
         </div>
         <button className="w-10 h-10 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center hover:bg-white/20 transition-colors">
           <Zap className="text-white" size={20} />
@@ -206,6 +262,38 @@ export default function QrScannerScreen({ onBack, onScanComplete }: QrScannerScr
       {/* Bottom controls */}
       <div className="absolute bottom-0 left-0 right-0 z-10 px-5 pb-8 bg-gradient-to-t from-black/80 via-black/60 to-transparent pt-8">
         <div className="space-y-4">
+          {!showManualEntry ? (
+            <button
+              onClick={() => { setShowManualEntry(true); setParseError(""); }}
+              className="w-full h-11 rounded-xl bg-white/10 text-white text-sm font-semibold hover:bg-white/20 transition-colors"
+            >
+              Enter code manually
+            </button>
+          ) : (
+            <div className="bg-black/60 border border-white/10 rounded-2xl p-3">
+              <p className="text-white/60 text-xs mb-2">
+                Paste a payment code (kumba://pay?…, JSON, or 10-digit account)
+              </p>
+              <div className="flex gap-2">
+                <input
+                  value={manualCode}
+                  onChange={(e) => setManualCode(e.target.value)}
+                  placeholder="kumba://pay?account=…"
+                  className="flex-1 h-11 px-3 bg-white/5 border border-white/10 rounded-xl text-white text-sm placeholder:text-white/30 outline-none focus:border-[#00FF41]/50"
+                />
+                <button
+                  onClick={handleManualSubmit}
+                  className="h-11 px-4 rounded-xl bg-[#00FF41] text-black text-sm font-bold"
+                >
+                  Parse
+                </button>
+              </div>
+              {parseError && <p className="text-red-400 text-xs mt-2">{parseError}</p>}
+              <button onClick={() => setShowManualEntry(false)} className="text-white/40 text-xs mt-2">
+                Cancel
+              </button>
+            </div>
+          )}
           {/* Mode toggle */}
           <div className="flex gap-3 mb-6">
             <Button
@@ -275,6 +363,8 @@ export default function QrScannerScreen({ onBack, onScanComplete }: QrScannerScr
           setShowOcrResult(false)
           if (onScanComplete) onScanComplete()
         }}
+        data={parsedResult}
+        demo={!parsedResult}
       />
     </div>
   )

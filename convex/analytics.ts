@@ -1,11 +1,12 @@
 import { query } from "./_generated/server"
 import { v } from "convex/values"
-
-const MONTH_MS = 30 * 24 * 60 * 60 * 1000
+import { MONTH_MS } from "./lib/constants"
+import { requireSession } from "./lib/auth"
 
 export const getFinancialHealth = query({
-  args: { userId: v.id("users") },
+  args: { userId: v.id("users"), sessionToken: v.string() },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     const now = Date.now()
     const monthStart = now - MONTH_MS
     const prevMonthStart = now - 2 * MONTH_MS
@@ -75,8 +76,9 @@ export const getFinancialHealth = query({
 })
 
 export const getMonthlySummary = query({
-  args: { userId: v.id("users") },
+  args: { userId: v.id("users"), sessionToken: v.string() },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     const now = Date.now()
     const monthStart = now - MONTH_MS
 

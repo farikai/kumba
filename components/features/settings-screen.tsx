@@ -1,6 +1,10 @@
 "use client"
 
 import { useState } from "react"
+import { useMutation, useQuery } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 import {
   ArrowLeft,
   User,
@@ -46,18 +50,32 @@ type SettingsView =
   | "about"
 
 export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange, kumbaDefault: kumbaDefaultProp = false }: SettingsScreenProps) {
+  const { session, saveSession, clearSession } = useSession()
+  const authedUserId = session?.userId as Id<"users"> | undefined
+  const authed = authedUserId && session?.sessionToken
+    ? { userId: authedUserId, sessionToken: session.sessionToken }
+    : "skip"
+  const profile = useQuery(api.users.getById, authed)
+  const verifyPinStrict = useMutation(api.users.verifyPinStrict)
+  const changePin = useMutation(api.users.setPin)
+  const saveProfile = useMutation(api.users.updateProfile)
+  const serverLogout = useMutation(api.users.logout)
+
   const [kumbaDefault, setKumbaDefault] = useState(kumbaDefaultProp)
   const [currentView, setCurrentView] = useState<SettingsView>("main")
   const [biometricEnabled, setBiometricEnabled] = useState(true)
   const [fraudAlertsEnabled, setFraudAlertsEnabled] = useState(true)
+  const [pinError, setPinError] = useState("")
+  const [pinBusy, setPinBusy] = useState(false)
+  const [profileSaved, setProfileSaved] = useState(false)
 
-  // Personal Info State
+  // Personal Info State (name/phone come from the real account)
   const [personalInfo, setPersonalInfo] = useState({
-    fullName: "Tunde Johnson",
-    email: "tunde.johnson@gmail.com",
-    phone: "+234 901 234 5678",
-    address: "15 Admiralty Way, Lekki Phase 1, Lagos",
-    dateOfBirth: "1990-05-15",
+    fullName: session?.name ?? "",
+    email: "",
+    phone: session?.phone ?? "",
+    address: "",
+    dateOfBirth: "",
   })
 
   // PIN Change State
@@ -80,24 +98,80 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
   })
 
   const handlePinInput = (digit: string, type: "current" | "new" | "confirm") => {
+    if (pinBusy) return
     if (type === "current" && currentPin.length < 4) {
       const newValue = currentPin + digit
       setCurrentPin(newValue)
+      setPinError("")
       if (newValue.length === 4) {
-        setTimeout(() => setPinChangeStep("new"), 500)
+        void verifyCurrentPin(newValue)
       }
     } else if (type === "new" && newPin.length < 4) {
       const newValue = newPin + digit
       setNewPin(newValue)
+      setPinError("")
       if (newValue.length === 4) {
         setTimeout(() => setPinChangeStep("confirm"), 500)
       }
     } else if (type === "confirm" && confirmPin.length < 4) {
       const newValue = confirmPin + digit
       setConfirmPin(newValue)
+      setPinError("")
       if (newValue.length === 4) {
-        setTimeout(() => setPinChangeStep("success"), 1000)
+        void submitPinChange(newValue)
       }
+    }
+  }
+
+  /** Step 1: the current PIN is checked server-side (attempt-limited). */
+  const verifyCurrentPin = async (value: string) => {
+    if (!authedUserId || !session?.sessionToken) {
+      setPinError("You are not logged in.")
+      setCurrentPin("")
+      return
+    }
+    setPinBusy(true)
+    try {
+      await verifyPinStrict({ userId: authedUserId, sessionToken: session.sessionToken, pin: value })
+      setTimeout(() => setPinChangeStep("new"), 300)
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : "Incorrect PIN.")
+      setCurrentPin("")
+    } finally {
+      setPinBusy(false)
+    }
+  }
+
+  /** Step 3: confirm matches new, then change server-side (rotates session). */
+  const submitPinChange = async (value: string) => {
+    if (value !== newPin) {
+      setPinError("PINs do not match. Enter your new PIN again.")
+      setConfirmPin("")
+      setNewPin("")
+      setPinChangeStep("new")
+      return
+    }
+    if (!authedUserId || !session?.sessionToken) {
+      setPinError("You are not logged in.")
+      return
+    }
+    setPinBusy(true)
+    try {
+      const result = await changePin({
+        userId: authedUserId,
+        sessionToken: session.sessionToken,
+        currentPin,
+        newPin: value,
+      })
+      // The server rotates the session token on PIN change — adopt it so
+      // this device stays logged in and others are signed out.
+      saveSession({ ...session, sessionToken: result.sessionToken })
+      setTimeout(() => setPinChangeStep("success"), 500)
+    } catch (e) {
+      setPinError(e instanceof Error ? e.message : "Could not change PIN.")
+      setConfirmPin("")
+    } finally {
+      setPinBusy(false)
     }
   }
 
@@ -107,10 +181,37 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
     else setConfirmPin(confirmPin.slice(0, -1))
   }
 
+  const handleLogout = async () => {
+    try {
+      if (authedUserId && session?.sessionToken) {
+        await serverLogout({ userId: authedUserId, sessionToken: session.sessionToken })
+      }
+    } catch {
+      /* token may already be invalid — still sign out locally */
+    }
+    clearSession()
+    onLogout?.()
+  }
+
+  const handleSaveProfile = async () => {
+    if (!authedUserId || !session?.sessionToken) return
+    const name = personalInfo.fullName.trim()
+    if (!name) return
+    try {
+      await saveProfile({ userId: authedUserId, sessionToken: session.sessionToken, name })
+      saveSession({ ...session, name })
+      setProfileSaved(true)
+      setTimeout(() => setProfileSaved(false), 2500)
+    } catch {
+      /* surface via placeholder — no toast infra in this screen */
+    }
+  }
+
   const resetPinChange = () => {
     setCurrentPin("")
     setNewPin("")
     setConfirmPin("")
+    setPinError("")
     setPinChangeStep("current")
   }
 
@@ -148,13 +249,22 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
 
         <div className="flex-1 flex flex-col items-center justify-center px-5">
           <h1 className="text-white text-2xl font-bold mb-2">{title}</h1>
-          <p className="text-white/50 text-sm mb-8">
+          <p className="text-white/50 text-sm mb-4 text-center">
             {type === "current"
-              ? "Enter your current PIN to continue"
+              ? "Enter your current account PIN to continue"
               : type === "new"
                 ? "Choose a new 4-digit PIN"
                 : "Re-enter your new PIN to confirm"}
           </p>
+          <p className="text-white/30 text-xs mb-6 text-center">
+            Your account uses a single PIN for login and transactions.
+          </p>
+          {pinError && (
+            <p className="text-red-400 text-sm text-center mb-4 animate-pulse">{pinError}</p>
+          )}
+          {pinBusy && (
+            <p className="text-[#00FF41] text-sm text-center mb-4">Verifying…</p>
+          )}
 
           {/* PIN Dots */}
           <div className="flex gap-4 mb-8">
@@ -230,6 +340,36 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
   // Change Transaction PIN
   if (currentView === "change-transaction-pin") {
     return renderPinScreen(pinChangeStep as "current" | "new" | "confirm")
+  }
+
+  // KYC status (read-only — no verification provider is wired, so the
+  // onboarding step records a self-attestation only).
+  if (currentView === "kyc") {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-[#0a1a12] via-[#0d1f16] to-[#0a1a12]">
+        <div className="px-5 pt-5 pb-4 flex items-center gap-3 border-b border-white/5">
+          <button
+            onClick={() => setCurrentView("main")}
+            className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
+          >
+            <ArrowLeft className="text-white" size={20} />
+          </button>
+          <h1 className="text-white text-lg font-bold">KYC Verification</h1>
+        </div>
+        <div className="px-5 py-6">
+          <div className="bg-white/[0.03] border border-white/10 rounded-2xl p-5">
+            <p className="text-white font-semibold text-sm mb-1">
+              Status: {(profile?.kycStatus ?? "none") === "self_attested" ? "Self-attested" : "Not provided"}
+            </p>
+            <p className="text-white/50 text-xs leading-relaxed">
+              Identity details are self-reported in this build — no BVN/NIN verification provider is connected,
+              so this does <span className="text-white font-semibold">not</span> constitute verified KYC.
+              Regulated verification must be completed before production financial services.
+            </p>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   // Personal Information Screen
@@ -328,9 +468,15 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
             </div>
           </div>
 
-          <button className="w-full h-14 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold text-base rounded-2xl transition-all">
-            Save Changes
+          <button
+            onClick={handleSaveProfile}
+            className="w-full h-14 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold text-base rounded-2xl transition-all"
+          >
+            {profileSaved ? "Saved ✓" : "Save Changes"}
           </button>
+          <p className="text-white/30 text-xs text-center">
+            Only your display name is stored on your account. Other fields are kept on this device only.
+          </p>
         </div>
       </div>
     )
@@ -581,12 +727,12 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
             </div>
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-1">
-                <h2 className="text-white font-bold text-lg">Tunde Johnson</h2>
+                <h2 className="text-white font-bold text-lg">{profile?.name ?? session?.name ?? "Your Account"}</h2>
                 <CheckCircle2 className="text-[#00FF41]" size={16} />
               </div>
-              <p className="text-white/40 text-sm">@tunde_j</p>
+              <p className="text-white/40 text-sm">{profile?.tag ?? session?.phone ?? ""}</p>
               <span className="inline-block mt-1 px-2 py-0.5 bg-[#00FF41]/10 border border-[#00FF41]/30 rounded text-[#00FF41] text-[10px] font-bold">
-                PRO USER
+                {(profile?.kycStatus ?? "none") === "self_attested" ? "KYC SELF-ATTESTED" : "KYC NOT PROVIDED"}
               </span>
             </div>
           </div>
@@ -620,11 +766,14 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
               <span className="text-white text-sm font-medium flex-1 text-left">Personal Information</span>
               <ChevronRight className="text-white/30" size={18} />
             </button>
-            <button className="w-full px-4 py-4 flex items-center gap-3 hover:bg-white/5 transition-colors">
+            <button
+              onClick={() => setCurrentView("kyc")}
+              className="w-full px-4 py-4 flex items-center gap-3 hover:bg-white/5 transition-colors"
+            >
               <Shield className="text-white/60" size={18} />
               <span className="text-white text-sm font-medium flex-1 text-left">KYC Verification</span>
-              <span className="px-2 py-0.5 bg-[#00FF41]/10 border border-[#00FF41]/30 rounded text-[#00FF41] text-[10px] font-bold mr-1">
-                Level 2
+              <span className="px-2 py-0.5 bg-white/10 border border-white/10 rounded text-white/60 text-[10px] font-bold mr-1">
+                {(profile?.kycStatus ?? "none") === "self_attested" ? "SELF-ATTESTED" : "NOT STARTED"}
               </span>
               <ChevronRight className="text-white/30" size={18} />
             </button>
@@ -748,7 +897,7 @@ export default function SettingsScreen({ onBack, onLogout, onKumbaDefaultChange,
 
         {/* Log Out */}
         <button
-          onClick={onLogout}
+          onClick={handleLogout}
           className="w-full py-4 text-red-500 font-semibold text-sm flex items-center justify-center gap-2 hover:opacity-80 transition-opacity"
         >
           <LogOut size={18} />

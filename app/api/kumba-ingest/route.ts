@@ -3,17 +3,18 @@ import { buildFinancialContext } from "@/lib/rag"
 
 export async function POST(req: Request) {
   try {
-    const { userId } = await req.json()
-    if (!userId) {
-      return new Response(JSON.stringify({ error: "userId required" }), { status: 400 })
+    const { userId, sessionToken } = await req.json()
+    if (!userId || !sessionToken) {
+      return new Response(JSON.stringify({ error: "userId and sessionToken required" }), { status: 400 })
     }
 
-    const ctx = await buildFinancialContext(userId)
+    const ctx = await buildFinancialContext(userId, sessionToken)
 
-    await clearUserRagChunks(userId)
+    await clearUserRagChunks(userId, sessionToken)
 
     await ingestUserData(
       userId,
+      sessionToken,
       ctx.recentTransactions as any[],
       ctx.beneficiaries as any[],
       ctx.scheduledPayments as any[],

@@ -1,8 +1,10 @@
 "use client"
 
 import { useState, useCallback } from "react"
-import { useAction } from "convex/react"
+import { useAction, useMutation, useQuery } from "convex/react"
 import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 import {
   ArrowLeft,
   Search,
@@ -34,6 +36,7 @@ interface Contact {
   name: string
   phone: string
   bank?: string
+  bankCode?: string
   accountNumber?: string
   avatar: string
   color: string
@@ -113,8 +116,20 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
   const [selectedBank, setSelectedBank] = useState<(typeof banks)[0] | null>(null)
   const [accountNumber, setAccountNumber] = useState("")
   const [accountName, setAccountName] = useState("")
+  const [lookupUnverified, setLookupUnverified] = useState(false)
+  const [transferRef, setTransferRef] = useState("")
   const [isVerifying, setIsVerifying] = useState(false)
   const [isVerified, setIsVerified] = useState(false)
+  const [saveBeneficiary, setSaveBeneficiary] = useState(true)
+  const [pinError, setPinError] = useState("")
+
+  const { session } = useSession()
+  const verifyPinStrict = useMutation(api.users.verifyPinStrict)
+  const addBeneficiary = useMutation(api.beneficiaries.add)
+  const liveBalance = useQuery(
+    api.wallet.getBalance,
+    session ? { userId: session.userId as Id<"users">, sessionToken: session.sessionToken } : "skip"
+  )
 
   const lookupAccount = useAction(apiAny.actions["9psb"].lookupAccount)
 
@@ -128,20 +143,29 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
     setSelectedBank(null)
     setAccountNumber("")
     setAccountName("")
+    setLookupUnverified(false)
     setIsVerified(false)
   }
 
   const handleVerifyAccount = useCallback(async () => {
-    if (accountNumber.length === 10 && selectedBank) {
+    if (accountNumber.length === 10 && selectedBank && session) {
       setIsVerifying(true)
-      const result = await lookupAccount({ accountNumber, bankCode: selectedBank.code })
+      const result = await lookupAccount({
+        userId: session.userId as any,
+        sessionToken: session.sessionToken,
+        accountNumber,
+        bankCode: selectedBank.code,
+      })
       setIsVerifying(false)
       if (result.success && result.data) {
         setAccountName(result.data.accountName)
+        // Sandbox lookups cannot confirm the real holder name — surface
+        // that explicitly instead of presenting it as verified.
+        setLookupUnverified(String(result.data.accountName ?? "").includes("UNVERIFIED"))
         setIsVerified(true)
       }
     }
-  }, [accountNumber, selectedBank, lookupAccount])
+  }, [accountNumber, selectedBank, lookupAccount, session])
 
   const handleManualContinue = () => {
     if (isVerified && selectedBank && accountNumber) {
@@ -150,6 +174,7 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
         name: accountName,
         phone: "",
         bank: selectedBank.name,
+        bankCode: selectedBank.code,
         accountNumber: accountNumber,
         avatar: "👤",
         color: "#00FF41",
@@ -174,21 +199,70 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
     if (pin.length < 4) {
       const newPin = pin + digit
       setPin(newPin)
-      if (newPin.length === 4 && selectedContact && userId) {
+      setPinError("")
+      if (newPin.length === 4 && selectedContact && session) {
         setIsProcessing(true)
-        const result = await sendMoney({
-          userId: userId as any,
-          amount: Number.parseFloat(amount),
-          accountNumber: selectedContact.accountNumber ?? "",
-          bankCode: selectedContact.bank ?? "",
-          accountName: selectedContact.name,
-          narration: note || `Transfer to ${selectedContact.name}`,
-          recipientName: selectedContact.name,
-        })
-        setIsProcessing(false)
-        if (result.success) {
+        try {
+          // The PIN pad previously called the transfer without checking the
+          // PIN at all. Verify server-side first (attempt-limited).
+          await verifyPinStrict({
+            userId: session.userId as Id<"users">,
+            sessionToken: session.sessionToken,
+            pin: newPin,
+          })
+          // Manual entries carry the exact bank code; suggested contacts
+          // resolve it from the bank list (previously the bank NAME was sent
+          // as the code, which every provider rejects).
+          const bankCode =
+            selectedContact.bankCode ??
+            banks.find((b) => b.name === selectedContact.bank)?.code ??
+            ""
+          const result = await sendMoney({
+            userId: session.userId as any,
+            sessionToken: session.sessionToken,
+            amount: Number.parseFloat(amount),
+            accountNumber: selectedContact.accountNumber ?? "",
+            bankCode,
+            accountName: selectedContact.name,
+            narration: note || `Transfer to ${selectedContact.name}`,
+            recipientName: selectedContact.name,
+            idempotencyKey: `SEND-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+          })
+          if (!result.success) {
+            throw new Error(
+              (result as { error?: { message?: string } }).error?.message ?? "Transfer failed"
+            )
+          }
+          // Display the real ledger/provider reference returned by the
+          // action — never fabricate one client-side.
+          setTransferRef(
+            (result as { reference?: string }).reference ??
+              `SEND-${Date.now().toString().slice(-8)}`
+          )
+          // Honor the "save as beneficiary" checkbox (previously a no-op).
+          if (saveBeneficiary && selectedContact.accountNumber && selectedContact.bank) {
+            try {
+              await addBeneficiary({
+                userId: session.userId as Id<"users">,
+                sessionToken: session.sessionToken,
+                name: selectedContact.name,
+                bankName: selectedContact.bank,
+                accountNumber: selectedContact.accountNumber,
+              })
+            } catch {
+              /* transfer already succeeded; beneficiary save is best-effort */
+            }
+          }
           setCurrentStep("success")
+        } catch (e) {
+          setPinError(e instanceof Error ? e.message : "Transfer failed. Try again.")
+          setPin("")
+        } finally {
+          setIsProcessing(false)
         }
+      } else if (newPin.length === 4 && !session) {
+        setPinError("You are not logged in. Restart the app and log in again.")
+        setPin("")
       }
     }
   }
@@ -203,9 +277,11 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
     setAmount("")
     setNote("")
     setPin("")
+    setTransferRef("")
     setSelectedBank(null)
     setAccountNumber("")
     setAccountName("")
+    setLookupUnverified(false)
     setIsVerified(false)
   }
 
@@ -285,6 +361,7 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
                   const value = e.target.value.replace(/\D/g, "").slice(0, 10)
                   setAccountNumber(value)
                   setIsVerified(false)
+                  setLookupUnverified(false)
                   setAccountName("")
                   if (value.length === 10 && selectedBank) {
                     handleVerifyAccount()
@@ -305,15 +382,28 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
             </div>
           </div>
 
-          {/* Account Name (Verified) */}
+          {/* Account Name (lookup result — sandbox cannot verify holder) */}
           {accountName && (
-            <div className="bg-[#00FF41]/10 border border-[#00FF41]/30 rounded-xl p-4">
+            <div
+              className={
+                lookupUnverified
+                  ? "bg-[#FFA500]/10 border border-[#FFA500]/30 rounded-xl p-4"
+                  : "bg-[#00FF41]/10 border border-[#00FF41]/30 rounded-xl p-4"
+              }
+            >
               <p className="text-white/60 text-xs mb-1">Account Name</p>
               <p className="text-white font-bold text-lg">{accountName}</p>
-              <p className="text-[#00FF41] text-xs mt-1 flex items-center gap-1">
-                <CheckCircle2 size={12} />
-                Account verified successfully
-              </p>
+              {lookupUnverified ? (
+                <p className="text-[#FFA500] text-xs mt-1">
+                  Not verified (sandbox) — confirm the account details with the recipient before
+                  sending. Do not rely on this name.
+                </p>
+              ) : (
+                <p className="text-[#00FF41] text-xs mt-1 flex items-center gap-1">
+                  <CheckCircle2 size={12} />
+                  Account verified successfully
+                </p>
+              )}
             </div>
           )}
 
@@ -322,8 +412,9 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
             <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"
+                checked={saveBeneficiary}
+                onChange={(e) => setSaveBeneficiary(e.target.checked)}
                 className="w-5 h-5 rounded border-white/20 bg-white/5 text-[#00FF41] focus:ring-[#00FF41]"
-                defaultChecked
               />
               <span className="text-white/70 text-sm">Save as beneficiary for future transfers</span>
             </label>
@@ -558,7 +649,9 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
                 className="bg-transparent text-white text-5xl font-bold text-center outline-none w-full max-w-xs"
               />
             </div>
-            <p className="text-white/30 text-sm mt-2">Balance: ₦842,300.50</p>
+            <p className="text-white/30 text-sm mt-2">
+              Balance: {liveBalance !== undefined ? `₦${liveBalance.toLocaleString()}` : "…"}
+            </p>
           </div>
         </div>
 
@@ -603,7 +696,10 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
 
   // Confirm Screen
   if (currentStep === "confirm") {
-    const fee = 10
+    // No fee is charged: the wallet debits the amount only, and the sandbox
+    // provider never settles a fee. Showing a fee here would mismatch the
+    // ledger, so display ₦0 explicitly until a live fee model exists.
+    const fee = 0
     const total = Number.parseFloat(amount) + fee
 
     return (
@@ -648,7 +744,7 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-white/60 text-sm">Transaction Fee</span>
-                <span className="text-white font-semibold">₦{fee.toLocaleString()}</span>
+                <span className="text-white font-semibold">₦{fee.toLocaleString()} (sandbox)</span>
               </div>
               {note && (
                 <div className="flex justify-between items-center">
@@ -739,6 +835,10 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
             </div>
           )}
 
+          {pinError && (
+            <p className="text-red-400 text-sm text-center mb-4 animate-pulse">{pinError}</p>
+          )}
+
           <button className="text-[#00FF41] text-sm font-medium mb-8">Forgot PIN?</button>
 
           {/* Number Pad */}
@@ -800,7 +900,7 @@ export default function SendMoneyScreen({ onBack, onScanQR, userId }: SendMoneyS
             </div>
             <div className="flex justify-between items-center">
               <span className="text-white/60 text-sm">Reference</span>
-              <span className="text-white font-medium text-xs">KPY{Date.now().toString().slice(-8)}</span>
+              <span className="text-white font-medium text-xs">{transferRef || "—"}</span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-white/60 text-sm">Date</span>

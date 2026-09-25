@@ -1,25 +1,21 @@
 "use client"
 
 import type React from "react"
-
 import { useState } from "react"
+import { motion } from "framer-motion"
 import { ArrowLeft, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ArrowRight } from "lucide-react"
 
 interface KycScreenProps {
-  onComplete: () => void
+  onComplete: (data: { idType: "bvn" | "nin"; idNumber: string }) => void
   onBack?: () => void
 }
 
 export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
   const [verifyType, setVerifyType] = useState<"bvn" | "nin">("bvn")
   const [verifyNumber, setVerifyNumber] = useState("")
-
-  const handleVerifyTypeChange = (type: "bvn" | "nin") => {
-    setVerifyType(type)
-  }
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value.replace(/\D/g, "")
@@ -28,17 +24,7 @@ export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (verifyNumber.length >= 11) {
-      setTimeout(() => {
-        onComplete()
-      }, 300)
-    }
-  }
-
-  const handleBackClick = () => {
-    if (onBack) {
-      onBack()
-    }
+    if (verifyNumber.length >= 11) setTimeout(() => onComplete({ idType: verifyType, idNumber: verifyNumber }), 300)
   }
 
   return (
@@ -46,13 +32,15 @@ export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
       {/* Header */}
       <div className="px-6 py-6 flex items-center justify-between">
         {onBack && (
-          <button
-            onClick={handleBackClick}
+          <motion.button
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            onClick={onBack}
             type="button"
-            className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors active:bg-white/15"
+            className="w-10 h-10 rounded-full bg-white/5 border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors active:bg-white/15"
           >
             <ArrowLeft className="text-white" size={20} />
-          </button>
+          </motion.button>
         )}
         <div className="flex-1 text-center">
           <span className="text-white text-base font-semibold">Verify Identity</span>
@@ -62,34 +50,39 @@ export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
 
       {/* Content */}
       <div className="flex-1 px-6 pt-8 max-w-md mx-auto w-full">
-        <div className="space-y-2 mb-10">
-          <h1 className="text-white text-3xl font-bold tracking-tight">Let's secure your account</h1>
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="space-y-2 mb-10"
+        >
+          <h1 className="text-white text-3xl font-bold tracking-tight">Let&apos;s secure your account</h1>
           <p className="text-white/60 text-sm leading-relaxed">
-            To activate your Korapay wallet and start spending, we need to confirm it's really you.
+            To activate your Korapay wallet and start spending, we need to confirm it&apos;s really you.
           </p>
-        </div>
+        </motion.div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <motion.form
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          onSubmit={handleSubmit}
+          className="space-y-6"
+        >
           {/* BVN/NIN Tabs */}
           <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={() => handleVerifyTypeChange("bvn")}
-              className={`flex-1 h-12 rounded-xl font-semibold text-sm transition-all ${
-                verifyType === "bvn" ? "bg-[#00FF41] text-black" : "bg-white/5 text-white/60 hover:bg-white/10"
-              }`}
-            >
-              BVN
-            </button>
-            <button
-              type="button"
-              onClick={() => handleVerifyTypeChange("nin")}
-              className={`flex-1 h-12 rounded-xl font-semibold text-sm transition-all ${
-                verifyType === "nin" ? "bg-[#00FF41] text-black" : "bg-white/5 text-white/60 hover:bg-white/10"
-              }`}
-            >
-              NIN
-            </button>
+            {(["bvn", "nin"] as const).map((type) => (
+              <motion.button
+                key={type}
+                type="button"
+                onClick={() => setVerifyType(type)}
+                whileTap={{ scale: 0.95 }}
+                className={`flex-1 h-12 rounded-xl font-semibold text-sm transition-all ${
+                  verifyType === type ? "bg-[#00FF41] text-black" : "bg-white/5 text-white/60 hover:bg-white/10"
+                }`}
+              >
+                {type.toUpperCase()}
+              </motion.button>
+            ))}
           </div>
 
           {/* Input Field */}
@@ -109,13 +102,7 @@ export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
               <div className="absolute right-4 top-1/2 -translate-y-1/2">
                 <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
                   <rect width="20" height="20" rx="4" fill="white" fillOpacity="0.05" />
-                  <path
-                    d="M10 6V8M10 11V14M10 17C6.13401 17 3 13.866 3 10C3 6.13401 6.13401 3 10 3C13.866 3 17 6.13401 17 10C17 13.866 13.866 17 10 17Z"
-                    stroke="white"
-                    strokeOpacity="0.4"
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  />
+                  <path d="M10 6V8M10 11V14M10 17C6.13401 17 3 13.866 3 10C3 6.13401 6.13401 3 10 3C13.866 3 17 6.13401 17 10C17 13.866 13.866 17 10 17Z" stroke="white" strokeOpacity="0.4" strokeWidth="1.5" strokeLinecap="round" />
                 </svg>
               </div>
             </div>
@@ -128,7 +115,12 @@ export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
           </div>
 
           {/* Info Box */}
-          <div className="bg-[#00FF41]/5 border border-[#00FF41]/20 rounded-xl p-4">
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3 }}
+            className="bg-[#00FF41]/5 border border-[#00FF41]/20 rounded-xl p-4"
+          >
             <div className="flex gap-3">
               <div className="w-5 h-5 rounded-full bg-[#00FF41]/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                 <Info size={12} className="text-[#00FF41]" />
@@ -141,17 +133,19 @@ export default function KycScreen({ onComplete, onBack }: KycScreenProps) {
                 </p>
               </div>
             </div>
-          </div>
+          </motion.div>
 
-          <Button
-            type="submit"
-            disabled={verifyNumber.length < 11}
-            className="w-full h-14 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold text-base rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-[#00FF41]/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-          >
-            Verify & Continue
-            <ArrowRight size={20} />
-          </Button>
-        </form>
+          <motion.div whileTap={{ scale: 0.98 }}>
+            <Button
+              type="submit"
+              disabled={verifyNumber.length < 11}
+              className="w-full h-14 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold text-base rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-[#00FF41]/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+            >
+              Verify & Continue
+              <ArrowRight size={20} />
+            </Button>
+          </motion.div>
+        </motion.form>
 
         <p className="text-center text-white/30 text-[10px] mt-6">
           <svg className="inline-block mr-1" width="12" height="12" viewBox="0 0 12 12" fill="currentColor">

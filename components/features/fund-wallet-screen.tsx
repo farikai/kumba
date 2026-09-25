@@ -1,20 +1,72 @@
 "use client"
 
-import { ArrowLeft, Copy, Building2, Shield } from "lucide-react"
+import { ArrowLeft, Copy, Building2, Shield, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useState } from "react"
+import { useQuery, useMutation } from "convex/react"
+import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 
 interface FundWalletScreenProps {
   onBack: () => void
+  userId?: Id<"users"> | string | null
 }
 
-export default function FundWalletScreen({ onBack }: FundWalletScreenProps) {
+export default function FundWalletScreen({ onBack, userId }: FundWalletScreenProps) {
   const [copied, setCopied] = useState(false)
+  const [topUpAmount, setTopUpAmount] = useState("")
+  const [topUpState, setTopUpState] = useState<"idle" | "working" | "error" | "done">("idle")
+  const [topUpError, setTopUpError] = useState("")
+  const { session } = useSession()
+  const effectiveUserId = (session?.userId ?? userId) as Id<"users"> | undefined
+  const effectiveToken = session?.sessionToken
+  const liveBalance = useQuery(
+    api.wallet.getBalance,
+    effectiveUserId && effectiveToken ? { userId: effectiveUserId, sessionToken: effectiveToken } : "skip"
+  )
+  const fundWallet = useMutation(api.wallet.fundWallet)
 
   const handleCopy = () => {
     navigator.clipboard.writeText("9023882100")
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleDemoTopUp = async () => {
+    if (!effectiveUserId || !effectiveToken) {
+      setTopUpError("You are not logged in.")
+      setTopUpState("error")
+      return
+    }
+    const value = Number(topUpAmount.replace(/,/g, ""))
+    if (!Number.isFinite(value) || value <= 0) {
+      setTopUpError("Enter an amount greater than zero.")
+      setTopUpState("error")
+      return
+    }
+    // Mirrors the server-side MAX_DEMO_TOPUP cap in convex/wallet.ts.
+    if (value > 200_000) {
+      setTopUpError("Demo top-up limit is ₦200,000 per transaction.")
+      setTopUpState("error")
+      return
+    }
+    setTopUpState("working")
+    setTopUpError("")
+    try {
+      await fundWallet({
+        userId: effectiveUserId,
+        sessionToken: effectiveToken,
+        amount: value,
+        description: "Demo wallet top-up (no real money)",
+        idempotencyKey: `FUND-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+      })
+      setTopUpState("done")
+      setTopUpAmount("")
+    } catch (e) {
+      setTopUpError(e instanceof Error ? e.message : "Top-up failed.")
+      setTopUpState("error")
+    }
   }
 
   return (
@@ -33,7 +85,48 @@ export default function FundWalletScreen({ onBack }: FundWalletScreenProps) {
       {/* Current Balance */}
       <div className="px-5 py-6 text-center">
         <p className="text-white/50 text-xs font-medium mb-1">Current Balance</p>
-        <h2 className="text-white text-4xl font-bold tracking-tight">₦45,200.00</h2>
+        <h2 className="text-white text-4xl font-bold tracking-tight">
+          {liveBalance !== undefined
+            ? `₦${liveBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+            : "…"}
+        </h2>
+      </div>
+
+      {/* Demo top-up (the only working funding path in this build stage) */}
+      <div className="px-5 pb-5">
+        <div className="bg-white/[0.03] border border-white/10 rounded-2xl p-5">
+          <h3 className="text-white font-bold text-base mb-1">Demo top-up</h3>
+          <p className="text-white/50 text-xs leading-relaxed mb-4">
+            No bank rail is connected yet, so this credits <span className="text-white font-semibold">demo funds only — no real money moves</span>.
+            Real funding (virtual account + webhook reconciliation) is still to be built.
+          </p>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-white/60 font-bold">₦</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={topUpAmount}
+                onChange={(e) => setTopUpAmount(e.target.value.replace(/[^0-9]/g, ""))}
+                placeholder="0"
+                className="w-full h-12 bg-white/5 border border-white/10 rounded-xl pl-10 pr-4 text-white text-lg font-bold placeholder:text-white/40 focus:border-[#00FF41] focus:outline-none"
+              />
+            </div>
+            <Button
+              onClick={handleDemoTopUp}
+              disabled={topUpState === "working"}
+              className="h-12 px-5 bg-[#00FF41] hover:bg-[#00FF41]/90 text-black font-bold text-sm rounded-xl disabled:opacity-50"
+            >
+              {topUpState === "working" ? "…" : "Add"}
+            </Button>
+          </div>
+          {topUpState === "done" && (
+            <p className="text-[#00FF41] text-xs mt-3">Demo funds added to your wallet.</p>
+          )}
+          {topUpState === "error" && (
+            <p className="text-red-400 text-xs mt-3">{topUpError}</p>
+          )}
+        </div>
       </div>
 
       {/* AI Tip */}
@@ -49,8 +142,16 @@ export default function FundWalletScreen({ onBack }: FundWalletScreenProps) {
         </div>
       </div>
 
-      {/* Virtual Account Card */}
+      {/* Virtual Account Card (NOT connected — display only) */}
       <div className="px-5 pb-5">
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-2xl p-4 mb-3 flex items-start gap-2.5">
+          <AlertTriangle className="text-amber-400 flex-shrink-0 mt-0.5" size={16} />
+          <p className="text-amber-200 text-xs leading-relaxed">
+            <span className="font-bold">Not connected.</span> Transfers to the account below will{" "}
+            <span className="font-bold">not</span> reflect in your wallet — no funding rail or webhook exists yet.
+            Use demo top-up above for testing.
+          </p>
+        </div>
         <div className="bg-gradient-to-br from-[#0f2a1c] to-[#0a1a12] border border-white/10 rounded-2xl p-5 shadow-xl">
           <div className="flex items-center justify-between mb-4">
             <p className="text-white/50 text-xs font-medium uppercase tracking-wide">Your Virtual Account</p>
@@ -88,7 +189,7 @@ export default function FundWalletScreen({ onBack }: FundWalletScreenProps) {
             {
               step: "3",
               title: "Funds reflect instantly",
-              desc: "Your Korapay wallet will be credited immediately after the payment is sent",
+              desc: "Not available yet — bank transfers to the demo account above are not monitored. Your Korapay wallet will NOT be credited until a real funding rail is connected.",
             },
           ].map((item, i) => (
             <div key={i} className="flex gap-3">

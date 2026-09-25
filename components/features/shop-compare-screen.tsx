@@ -7,6 +7,7 @@ import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 
 interface Product {
+  _id?: string
   name: string
   price: number
   originalPrice?: number
@@ -16,6 +17,10 @@ interface Product {
   savings?: number
   inStock: boolean
   category: string
+  // Present on marketplace mirrors; forwarded to the order screen so
+  // checkout links stock and seller payout server-side.
+  sellerId?: string
+  sellerProductId?: string
 }
 
 interface ShopCompareScreenProps {
@@ -30,14 +35,19 @@ export default function ShopCompareScreen({ onBack, onConfirmOrder }: ShopCompar
   const [activeCategory, setActiveCategory] = useState("All")
   const [searchedProduct, setSearchedProduct] = useState("")
 
-  const allProducts = useQuery(api.products.getAll) ?? []
+  const allProductsQuery = useQuery(api.products.getAll)
+  const allProducts = allProductsQuery ?? []
   const searchResults = useQuery(api.products.search, { query: searchedProduct || "__empty__" })
   const categoryResults = useQuery(api.products.getByCategory, { category: activeCategory === "All" ? "__all__" : activeCategory })
   const seedProducts = useMutation(api.products.seedProducts)
 
   useEffect(() => {
-    seedProducts()
-  }, [])
+    // Seed once, and only when the catalog has resolved empty — never on
+    // every mount, and never while the query is still loading (undefined).
+    if (allProductsQuery !== undefined && allProductsQuery.length === 0) {
+      seedProducts()
+    }
+  }, [allProductsQuery])
 
   const getDisplayProducts = (): Product[] => {
     if (searchedProduct) return (searchResults ?? []) as Product[]

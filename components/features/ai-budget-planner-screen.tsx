@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input"
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import type { Id } from "@/convex/_generated/dataModel"
+import { useSession } from "@/components/session-provider"
 
 interface AiBudgetPlannerScreenProps {
   onBack: () => void
@@ -32,14 +33,17 @@ const categoryColors: Record<string, string> = {
 const MONTH_MS = 30 * 24 * 60 * 60 * 1000
 
 export default function AiBudgetPlannerScreen({ onBack, userId }: AiBudgetPlannerScreenProps) {
-  const budgetData = useQuery(api.budgets.list, { userId })
+  const { session } = useSession()
+  const token = session?.sessionToken ?? ""
+  const authed = { userId, sessionToken: token }
+  const budgetData = useQuery(api.budgets.list, token ? authed : "skip")
   const setBudget = useMutation(api.budgets.setBudget)
   const removeBudget = useMutation(api.budgets.remove)
 
   const now = Date.now()
   const monthStart = now - MONTH_MS
 
-  const transactions = useQuery(api.wallet.getTransactions, { userId, limit: 200 }) ?? []
+  const transactions = useQuery(api.wallet.getTransactions, token ? { userId, sessionToken: token, limit: 200 } : "skip") ?? []
   const recentTx = transactions.filter((t) => t.createdAt >= monthStart && t.type === "debit")
   const income = transactions.filter((t) => t.createdAt >= monthStart && t.type === "credit" && t.status === "completed")
     .reduce((s, t) => s + t.amount, 0)
@@ -61,15 +65,16 @@ export default function AiBudgetPlannerScreen({ onBack, userId }: AiBudgetPlanne
 
   const handleSetBudget = (cat: string) => {
     const amount = Number.parseFloat(editAmount)
-    if (!amount || amount <= 0) return
+    if (!amount || amount <= 0 || !token) return
     const period = amount >= 1000000 ? "monthly" : "monthly"
-    setBudget({ userId, category: cat, amount, period })
+    setBudget({ userId, sessionToken: token, category: cat, amount, period })
     setEditingCategory(null)
     setEditAmount("")
   }
 
   const handleDeleteBudget = (id: string) => {
-    removeBudget({ id: id as unknown as Id<"budgets"> })
+    if (!token) return
+    removeBudget({ userId, sessionToken: token, id: id as unknown as Id<"budgets"> })
   }
 
   const chartData = budgets.map((b) => {

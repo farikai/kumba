@@ -1,9 +1,14 @@
 import { query, mutation } from "./_generated/server"
 import { v } from "convex/values"
+import { MONTH_MS } from "./lib/constants"
+import { requireOwner, requireSession } from "./lib/auth"
+
+const sessionArgs = { userId: v.id("users"), sessionToken: v.string() }
 
 export const list = query({
-  args: { userId: v.id("users") },
+  args: sessionArgs,
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     return await ctx.db
       .query("budgets")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
@@ -14,15 +19,21 @@ export const list = query({
 export const setBudget = mutation({
   args: {
     userId: v.id("users"),
+    sessionToken: v.string(),
     category: v.string(),
     amount: v.number(),
     period: v.union(v.literal("weekly"), v.literal("monthly")),
   },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
+    if (!Number.isFinite(args.amount) || args.amount <= 0)
+      throw new Error("Budget amount must be greater than zero");
+    const category = args.category.trim();
+    if (!category) throw new Error("Category is required");
     const existing = await ctx.db
       .query("budgets")
       .withIndex("by_userId_category", (q) =>
-        q.eq("userId", args.userId).eq("category", args.category)
+        q.eq("userId", args.userId).eq("category", category)
       )
       .first()
     if (existing) {
@@ -31,7 +42,7 @@ export const setBudget = mutation({
     }
     return await ctx.db.insert("budgets", {
       userId: args.userId,
-      category: args.category,
+      category,
       amount: args.amount,
       period: args.period,
       createdAt: Date.now(),
@@ -40,15 +51,19 @@ export const setBudget = mutation({
 })
 
 export const remove = mutation({
-  args: { id: v.id("budgets") },
+  args: { userId: v.id("users"), sessionToken: v.string(), id: v.id("budgets") },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
+    const budget = await ctx.db.get(args.id)
+    requireOwner(budget, args.userId, "budget")
     await ctx.db.delete(args.id)
   },
 })
 
 export const getSpendingByCategory = query({
-  args: { userId: v.id("users"), startDate: v.number(), endDate: v.number() },
+  args: { userId: v.id("users"), sessionToken: v.string(), startDate: v.number(), endDate: v.number() },
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     const transactions = await ctx.db
       .query("transactions")
       .withIndex("by_userId_createdAt", (q) => q.eq("userId", args.userId))
@@ -69,11 +84,10 @@ export const getSpendingByCategory = query({
   },
 })
 
-const MONTH_MS = 30 * 24 * 60 * 60 * 1000
-
 export const getBudgetAnalytics = query({
-  args: { userId: v.id("users") },
+  args: sessionArgs,
   handler: async (ctx, args) => {
+    await requireSession(ctx, args.userId, args.sessionToken)
     const now = Date.now()
     const monthStart = now - MONTH_MS
     const budgets = await ctx.db

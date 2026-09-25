@@ -4,13 +4,24 @@ import { Geist, Geist_Mono } from "next/font/google"
 import { Analytics } from "@vercel/analytics/next"
 import "./globals.css"
 
-const _geistSans = Geist({ subsets: ["latin"] })
-const _geistMono = Geist_Mono({ subsets: ["latin"] })
+const _geistSans = Geist({ subsets: ["latin"], variable: "--font-geist-sans" })
+const _geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" })
 
 export const metadata: Metadata = {
-  title: "Korapay - AI-Powered Digital Wallet",
-  description: "Send money with voice, QR, or text. Powered by AI.",
+  title: "Kumba - AI-Powered Digital Wallet",
+  description: "Send money with voice, QR, or text. Pay bills intelligently. Budget automatically. Africa's first AI-powered financial assistant.",
   generator: "v0.app",
+  manifest: "/manifest.json",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Kumba",
+  },
+  formatDetection: {
+    telephone: true,
+    email: false,
+    address: false,
+  },
   icons: {
     icon: [
       {
@@ -37,7 +48,7 @@ export const viewport: Viewport = {
   userScalable: false,
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#1a1a1a" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a1f0f" },
   ],
 }
 
@@ -51,6 +62,29 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <link rel="manifest" href="/manifest.json" />
+        <meta name="theme-color" content="#00FF41" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="Kumba" />
+        <link rel="apple-touch-icon" href="/apple-icon.png" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if ('serviceWorker' in navigator) {
+                window.addEventListener('load', function() {
+                  navigator.serviceWorker.register('/sw.js').then(function(reg) {
+                    console.log('SW registered:', reg.scope);
+                  }).catch(function(err) {
+                    console.log('SW registration failed:', err);
+                  });
+                });
+              }
+            `,
+          }}
+        />
+      </head>
       <body className={`font-sans antialiased ${_geistSans.variable} ${_geistMono.variable}`}>
         <ConvexClientProvider>
           <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>

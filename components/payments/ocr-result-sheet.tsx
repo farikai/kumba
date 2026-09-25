@@ -13,10 +13,12 @@ interface OcrResultSheetProps {
         accountName: string
         bankName: string
     }
+    /** True when showing sample data instead of a real extraction/parse. */
+    demo?: boolean
 }
 
-export function OcrResultSheet({ isOpen, onClose, onConfirm, data }: OcrResultSheetProps) {
-    // Mock data if none provided
+export function OcrResultSheet({ isOpen, onClose, onConfirm, data, demo = false }: OcrResultSheetProps) {
+    // Sample data only — never present it as an extraction result.
     const result = data || {
         accountNumber: "0123456789",
         accountName: "John Doe",
@@ -54,7 +56,9 @@ export function OcrResultSheet({ isOpen, onClose, onConfirm, data }: OcrResultSh
                             <div className="flex items-center justify-between py-6">
                                 <div>
                                     <h3 className="text-xl font-bold text-white">Account Details</h3>
-                                    <p className="text-white/50 text-xs mt-1">Extracted from image</p>
+                                    <p className="text-white/50 text-xs mt-1">
+                                        {demo ? "Sample data — not extracted from any image" : "Parsed from payment code"}
+                                    </p>
                                 </div>
                                 <button
                                     onClick={onClose}
