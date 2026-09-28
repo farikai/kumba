@@ -4,14 +4,71 @@ import { buildFinancialContext } from "@/lib/rag"
 export const maxDuration = 60
 export const runtime = "nodejs"
 
-const MONEY_TOOLS = new Set(["send_money", "buy_airtime", "buy_data", "pay_electricity", "pay_tv"])
+/**
+ * Money-movement tools are executed by the Convex action layer
+ * (convex/actions/9psb.ts). Each action validates input, calls the 9PSB
+ * provider, THEN debits the wallet with reconciliation-safe failure handling,
+ * so provider + ledger live in exactly one place. This route only forwards the
+ * tool call with the caller's session and a deterministic idempotency key.
+ */
+const MONEY_ACTION_PATHS: Record<string, string> = {
+  send_money: "actions/9psb:sendMoney",
+  buy_airtime: "actions/9psb:buyAirtime",
+  buy_data: "actions/9psb:buyData",
+  pay_electricity: "actions/9psb:payElectricity",
+  pay_tv: "actions/9psb:payTv",
+}
 
-const DEBIT_CATEGORY: Record<string, string> = {
-  send_money: "Transfers",
-  buy_airtime: "Airtime",
-  buy_data: "Data & Internet",
-  pay_electricity: "Electricity",
-  pay_tv: "TV & Entertainment",
+/** Map an AI money tool call onto the matching 9PSB action's argument shape. */
+function buildMoneyActionArgs(
+  toolName: string,
+  raw: Record<string, unknown>,
+  common: { userId: string; sessionToken: string; amount: number; idempotencyKey: string },
+): Record<string, unknown> {
+  const str = (v: unknown, fallback = "") =>
+    typeof v === "string" ? v : v == null ? fallback : String(v)
+  switch (toolName) {
+    case "send_money":
+      return {
+        ...common,
+        accountNumber: str(raw.accountNumber),
+        bankCode: str(raw.bankCode),
+        accountName: str(raw.accountName),
+        narration: str(raw.narration) || `Transfer to ${str(raw.accountName)}`,
+        recipientName: str(raw.accountName),
+      }
+    case "buy_airtime":
+      return {
+        ...common,
+        network: str(raw.network).toLowerCase(),
+        phoneNumber: str(raw.phoneNumber),
+      }
+    case "buy_data":
+      return {
+        ...common,
+        network: str(raw.network).toLowerCase(),
+        phoneNumber: str(raw.phoneNumber),
+        planId: str(raw.planId),
+      }
+    case "pay_electricity":
+      return {
+        ...common,
+        providerCode: str(raw.providerCode),
+        meterNumber: str(raw.meterNumber),
+        meterType: str(raw.meterType).toLowerCase(),
+        phoneNumber: str(raw.phoneNumber),
+      }
+    case "pay_tv":
+      return {
+        ...common,
+        providerCode: str(raw.providerCode),
+        smartCardNumber: str(raw.smartCardNumber),
+        packageId: str(raw.packageId),
+        phoneNumber: str(raw.phoneNumber),
+      }
+    default:
+      return { ...common }
+  }
 }
 
 /** Small deterministic hash for idempotency keys (retries dedup). */
@@ -29,6 +86,20 @@ async function convexMutation(convexUrl: string, path: string, args: Record<stri
   if (!res.ok) {
     const text = await res.text().catch(() => "")
     throw new Error(`Convex ${path} failed (${res.status}): ${text.slice(0, 200)}`)
+  }
+  const json = await res.json()
+  return json.value ?? json
+}
+
+async function convexAction(convexUrl: string, path: string, args: Record<string, unknown>) {
+  const res = await fetch(`${convexUrl}/api/action/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ args }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`Convex action ${path} failed (${res.status}): ${text.slice(0, 200)}`)
   }
   const json = await res.json()
   return json.value ?? json
@@ -73,27 +144,6 @@ export async function POST(req: Request) {
       totalReceivedThisMonth: finCtx.totalReceivedThisMonth,
       spendingByCategory: finCtx.spendingByCategory,
     })
-
-    const debitWallet = async (toolName: string, amount: number, recipient: string, description: string, idempotencyKey?: string) => {
-      if (!Number.isFinite(amount) || amount <= 0) throw new Error("Invalid amount")
-      // Caller-supplied key (deterministic per tool call) so POST retries
-      // dedup; fall back to a fresh key only when none is provided.
-      const key = idempotencyKey ?? `AI-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
-      const res = await fetch(`${convexUrl}/api/mutation/wallet:sendMoney`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          args: { userId, sessionToken, amount, recipientName: recipient, description, category: DEBIT_CATEGORY[toolName] ?? "Other", idempotencyKey: key },
-        }),
-      })
-      if (!res.ok) {
-        const t = await res.text()
-        throw new Error(`Wallet debit failed: ${t.slice(0, 200)}`)
-      }
-      // The wallet transaction reference IS the idempotency key, so the
-      // receipt below points at a real, queryable record.
-      return key
-    }
 
     for (const tc of toolCalls) {
       // --- Tools persisted here (not inside executeToolCall) ---
@@ -207,7 +257,38 @@ export async function POST(req: Request) {
         continue
       }
 
-      // --- Provider + debit tools (executed via lib/ai executors) ---
+      // --- Money-movement tools: single path via the Convex action layer ---
+      const actionPath = MONEY_ACTION_PATHS[tc.name]
+      if (actionPath) {
+        try {
+          const rawAmount = (tc.args ?? {}).amount
+          const coercedAmount = Number(rawAmount)
+          if (!Number.isFinite(coercedAmount) || coercedAmount <= 0) {
+            // An unparseable amount is a FAILURE, never a silent skip.
+            throw new Error(`Invalid amount: ${JSON.stringify(rawAmount)}`)
+          }
+          // Deterministic per-tool-call key: retrying the same pendingAction
+          // POST reuses it, and the wallet dedups on it, so it debits at most once.
+          const rawKey = (tc.args ?? {}).idempotencyKey
+          const toolKey = typeof rawKey === "string" && rawKey
+            ? rawKey
+            : `AI-${djb2(`${tc.name}|${JSON.stringify(tc.args ?? {})}`)}`
+          const actionArgs = buildMoneyActionArgs(tc.name, tc.args ?? {}, {
+            userId,
+            sessionToken,
+            amount: coercedAmount,
+            idempotencyKey: toolKey,
+          })
+          const result = await convexAction(convexUrl, actionPath, actionArgs)
+          results.push({ name: tc.name, args: tc.args, result })
+        } catch (e) {
+          results.push({ name: tc.name, args: tc.args, result: { success: false, error: (e as Error).message } })
+        }
+        continue
+      }
+
+      // --- Non-money tools (place_order debits inside its own mutation;
+      // fund_wallet only navigates) ---
       const result = await executeToolCall(
         {
           id: `exec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -216,56 +297,18 @@ export async function POST(req: Request) {
         },
         { userId, sessionToken, budgets: finCtx.budgets, fetchUserData },
       )
-      const parsed = JSON.parse(result)
-      let walletRef: string | null = null
-      let debitError: string | null = null
-      // Only debit when the provider call succeeded. place_order already
-      // debits inside its own mutation — debiting again would double-charge.
-      // Amounts are coerced strictly: an unparseable amount is a FAILURE,
-      // never a silent skip (which previously reported success).
-      if (MONEY_TOOLS.has(tc.name) && parsed.success !== false) {
-        const coercedAmount = Number(tc.args?.amount)
-        if (!Number.isFinite(coercedAmount) || coercedAmount <= 0) {
-          debitError = `Invalid amount: ${JSON.stringify(tc.args?.amount)}`
-        } else {
-          // Reuse one idempotency key for the whole tool call so a retried
-          // POST debits at most once.
-          const toolKey = typeof tc.args?.idempotencyKey === "string" && tc.args.idempotencyKey
-            ? tc.args.idempotencyKey
-            : `AI-${djb2(`${tc.name}|${JSON.stringify(tc.args ?? {})}`)}`
-          const debitArgs = { ...(tc.args ?? {}), amount: coercedAmount, idempotencyKey: toolKey }
-          try {
-            if (tc.name === "send_money") {
-              walletRef = await debitWallet(tc.name, debitArgs.amount, tc.args.accountName ?? "Transfer", tc.args.narration ?? `Transfer to ${tc.args.accountName ?? ""}`, toolKey)
-            } else if (tc.name === "buy_airtime") {
-              walletRef = await debitWallet(tc.name, debitArgs.amount, `${String(tc.args.network ?? "").toUpperCase()} Airtime`, `Airtime purchase - ${tc.args.phoneNumber ?? ""}`, toolKey)
-            } else if (tc.name === "buy_data") {
-              walletRef = await debitWallet(tc.name, debitArgs.amount, `${String(tc.args.network ?? "").toUpperCase()} Data`, `Data bundle - ${tc.args.phoneNumber ?? ""}`, toolKey)
-            } else if (tc.name === "pay_electricity") {
-              walletRef = await debitWallet(tc.name, debitArgs.amount, `Electricity - ${tc.args.providerCode ?? ""}`, `Electricity bill - meter ${tc.args.meterNumber ?? ""}`, toolKey)
-            } else if (tc.name === "pay_tv") {
-              walletRef = await debitWallet(tc.name, debitArgs.amount, `TV - ${tc.args.providerCode ?? ""}`, `TV subscription - ${tc.args.smartCardNumber ?? ""}`, toolKey)
-            }
-          } catch (e) {
-            debitError = (e as Error).message
-          }
-        }
-      }
-      results.push({
-        name: tc.name,
-        args: tc.args,
-        result: { ...parsed, ...(walletRef ? { walletRef } : {}), ...(debitError ? { debitError } : {}) },
-      })
+      results.push({ name: tc.name, args: tc.args, result: JSON.parse(result) })
     }
 
     // Receipts only for operations that actually succeeded — and the ref is
-    // the real wallet transaction reference, not a fabricated number.
+    // the real provider/wallet reference, not a fabricated number. A
+    // debit-after-provider failure (needsReconciliation) has success:false and
+    // therefore must NOT look like a completed transfer.
     const receipt = results.map((r) => {
-      const isTransfer = ["send_money", "buy_airtime", "buy_data", "pay_electricity", "pay_tv"].includes(r.name)
-      if (!isTransfer) return null
-      const ok = r.result?.success !== false && !r.result?.debitError
-      if (!ok) return null
-      const ref = r.result.walletRef ?? r.result.reference ?? null
+      if (!MONEY_ACTION_PATHS[r.name]) return null
+      const result = (r.result ?? {}) as { success?: boolean; reference?: string; providerReference?: string }
+      if (result.success !== true) return null
+      const ref = result.reference ?? result.providerReference ?? null
       if (!ref) return null
       return {
         type: r.name,
