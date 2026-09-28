@@ -1,4 +1,4 @@
-import { type Message, KUMBA_TOOLS, READ_TOOLS, NAV_TOOLS, WRITE_TOOLS, executeToolCall, chatCompletion } from "@/lib/ai"
+import { type Message, KUMBA_TOOLS, READ_TOOLS, NAV_TOOLS, WRITE_TOOLS, executeToolCall, buildToolFollowUpMessages, chatCompletion } from "@/lib/ai"
 import { buildFinancialContext, formatFinancialContext } from "@/lib/rag"
 
 export const maxDuration = 60
@@ -191,19 +191,15 @@ When the user asks about their finances, use this data. For operations, use the 
         )
       }
 
-      const followUpMessages: Message[] = [
-        ...apiMessages,
-        {
-          role: "assistant",
-          content: responseMsg.content ?? "",
-          tool_calls: responseMsg.tool_calls,
-        },
-        ...responseMsg.tool_calls.map((tc, i) => ({
-          role: "assistant" as const,
-          content: readResults[i] ?? "",
-          tool_call_id: tc.id,
-        })),
-      ]
+      // Tool results MUST use role "tool" with the matching tool_call_id,
+      // otherwise the model cannot read them (and some providers reject the
+      // request). buildToolFollowUpMessages enforces that shape.
+      const followUpMessages: Message[] = buildToolFollowUpMessages(
+        apiMessages,
+        responseMsg.content ?? "",
+        responseMsg.tool_calls,
+        readResults,
+      )
 
       const finalResponse = await chatCompletion({ messages: followUpMessages })
       const finalContent = finalResponse.choices?.[0]?.message?.content ?? ""

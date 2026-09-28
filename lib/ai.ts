@@ -7,7 +7,7 @@ const API_KEY = process.env.AI_API_KEY ?? ""
 
 // ─── Types ───────────────────────────────────────────────────────
 export interface Message {
-  role: "system" | "user" | "assistant"
+  role: "system" | "user" | "assistant" | "tool"
   content: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
@@ -471,10 +471,6 @@ export async function executeToolCall(
   const args = JSON.parse(toolCall.function.arguments)
   const { userId } = ctx
 
-  const requirePositive = (n: unknown, label = "amount") => {
-    if (!Number.isFinite(n as number) || (n as number) <= 0)
-      throw new Error(`${label} must be greater than zero`);
-  };
   const uniqueRef = (prefix: string) =>
     `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
@@ -502,61 +498,11 @@ export async function executeToolCall(
       return JSON.stringify({ totalSpent: total, byCategory, transactionCount: txs.length })
     }
 
-    case "send_money": {
-      requirePositive(args.amount);
-      const data = await ctx.fetchUserData()
-      if (data.balance < args.amount) {
-        return JSON.stringify({ success: false, error: "Insufficient balance", balance: data.balance, needed: args.amount })
-      }
-      const result = await ninePsb.transfer({
-        amount: args.amount,
-        currency: "NGN",
-        accountNumber: args.accountNumber,
-        bankCode: args.bankCode,
-        accountName: args.accountName,
-        narration: args.narration ?? "Transfer via Kumba",
-        reference: uniqueRef("KUMBA"),
-      })
-      return JSON.stringify({ ...result, note: "Debit must be applied by caller via wallet:sendMoney (category: Transfers)" })
-    }
-
-    case "buy_airtime": {
-      requirePositive(args.amount);
-      const data = await ctx.fetchUserData()
-      if (data.balance < args.amount) {
-        return JSON.stringify({ success: false, error: "Insufficient balance", balance: data.balance })
-      }
-      const result = await ninePsb.buyAirtime({
-        network: args.network,
-        phoneNumber: args.phoneNumber,
-        amount: args.amount,
-        reference: uniqueRef("KUMBA-ATM"),
-      })
-      return JSON.stringify({ ...result, note: "Debit must be applied by caller (category: Airtime)" })
-    }
-
-    case "buy_data": {
-      requirePositive(args.amount);
-      const data = await ctx.fetchUserData()
-      if (data.balance < args.amount) {
-        return JSON.stringify({ success: false, error: "Insufficient balance", balance: data.balance })
-      }
-      const result = await ninePsb.buyData({
-        network: args.network,
-        phoneNumber: args.phoneNumber,
-        planId: args.planId,
-        reference: uniqueRef("KUMBA-DAT"),
-      })
-      return JSON.stringify({ ...result, note: "Debit must be applied by caller (category: Data & Internet)" })
-    }
-
-    case "pay_electricity":
-      requirePositive(args.amount);
-      return JSON.stringify({ ...(await ninePsb.payElectricity({ ...args, reference: uniqueRef("KUMBA-ELE") })), note: "Debit must be applied by caller (category: Electricity)" })
-
-    case "pay_tv":
-      requirePositive(args.amount);
-      return JSON.stringify({ ...(await ninePsb.payTv({ ...args, reference: uniqueRef("KUMBA-TV") })), note: "Debit must be applied by caller (category: TV & Entertainment)" })
+    // NOTE: money-movement tools (send_money, buy_airtime, buy_data,
+    // pay_electricity, pay_tv) are intentionally NOT executed here. They run
+    // through the Convex action layer (convex/actions/9psb.ts), which owns the
+    // provider call AND the wallet debit (with reconciliation-safe failures).
+    // See app/api/kumba-execute/route.ts. This keeps exactly one money path.
 
     case "schedule_payment":
       // Honest descriptor only — persistence happens in /api/kumba-execute
@@ -800,6 +746,33 @@ export async function executeToolCall(
     default:
       return JSON.stringify({ error: `Unknown tool: ${toolCall.function.name}` })
   }
+}
+
+// ─── Tool-result message assembly ────────────────────────────────
+/**
+ * Build the assistant message plus tool-result messages that follow a
+ * tool-calling turn.
+ *
+ * OpenAI-compatible APIs (including OpenRouter) require tool outputs to be
+ * sent with role "tool" and the matching tool_call_id. Sending them as
+ * role "assistant" (an earlier bug) prevents the model from reading the tool
+ * results and is rejected outright by some providers.
+ */
+export function buildToolFollowUpMessages(
+  messages: Message[],
+  assistantContent: string,
+  toolCalls: ToolCall[],
+  toolResults: string[],
+): Message[] {
+  return [
+    ...messages,
+    { role: "assistant", content: assistantContent, tool_calls: toolCalls },
+    ...toolCalls.map((tc, i) => ({
+      role: "tool" as const,
+      content: toolResults[i] ?? "",
+      tool_call_id: tc.id,
+    })),
+  ]
 }
 
 // ─── OpenRouter Chat Completion ──────────────────────────────────
